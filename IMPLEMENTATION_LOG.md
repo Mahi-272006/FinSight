@@ -519,3 +519,226 @@ reversed the concept-priority direction (M2).
 `SECClient`, extract/segment text (MD&A, risk factors), chunk + embed with
 local sentence-transformers, persist to ChromaDB — the retrieval substrate
 the LLM analyst (M5/M6) will ground its interpretations in.
+
+---
+
+## M4 — Filing RAG Pipeline (download → extract → segment → chunk → embed → store)
+
+**Status:** ✅ COMPLETE
+
+### What was built
+
+| File | Role |
+|---|---|
+| `app/ingestion/sec_client.py` (extended) | `get_submissions()` (filing index API) + `get_bytes()` (byte-faithful document download); retry loop refactored into `_get_response()` — the single choke point for ALL SEC traffic (M1's 25 tests re-verified green after the refactor) |
+| `app/ingestion/filing_downloader.py` | `FilingRef` dataclass; `parse_recent_filings()` (submissions parallel-arrays → typed refs, ragged arrays tolerated); `select_filings()` (form filter, newest-first, limit after filter); archive URL builder (accession dashes stripped) |
+| `app/ingestion/filing_text.py` | The heart: `extract_paragraphs()` (lxml/bs4; strips script/style/noscript/`ix:header`/`display:none` XBRL blocks) → `segment_sections()` (Item headers with 4 guards + same-item absorption) → `chunk_document()`/`chunk_section()` (2400-char chunks, 300-char overlap, giant-paragraph sentence split) |
+| `app/services/embeddings.py` | `Embedder` protocol; `SentenceTransformerEmbedder` (all-MiniLM-L6-v2, 384-dim, L2-normalized, lazy load); `FakeEmbedder` (crc32 bag-of-tokens, process-stable, unit-norm) |
+| `app/services/vector_store.py` | ChromaDB wrapper: single `filing_text` collection, cosine space, deterministic ids `{accession}:{chunk_index}`, flat-dict `where` → explicit `$and`, `delete_filing()` |
+| `app/ingestion/rag_pipeline.py` | `process_filing()` orchestration: cache-first download → extract → segment → chunk → batched embed → delete-then-insert; `FilingStats` per-filing outcome (one filing failing never kills the run) |
+| `scripts/ingest_filings.py` | CLI: `python scripts/ingest_filings.py MSFT [..] [--limit N] [--forms ...]`, per-filing OK/FAIL lines, exit code aggregates failures |
+| `scripts/search_filings.py` | Retrieval demo CLI with `--k/--ticker/--section/--form` filters, prints provenance per hit |
+
+### Key design decisions
+
+- **One choke point for SEC traffic.** The retry/backoff/rate-limit logic
+  that lived in `_get_json` was refactored into `_get_response(url, accept)`
+  before adding document downloads — JSON APIs and binary documents share the
+  exact same policy, so rate limiting cannot drift between endpoints.
+- **Disk cache = idempotency + audit trail.** Raw HTML saved byte-for-byte
+  under `data/filings/{cik}/{accession}/{doc}` before parsing (M1's rule,
+  applied to documents). Re-running re-uses cached bytes → zero SEC traffic,
+  and any questionable extraction is diffable against its source bytes.
+- **Delete-then-insert per filing.** Upsert-by-id alone cannot remove chunks
+  whose ids a *changed chunker* would no longer regenerate (orphans). Found
+  the hard way while re-ingesting after segmentation fixes; now
+  `store.delete_filing(accession)` runs before every upsert.
+- **Deterministic ids `{accession}:{chunk_index}`** → re-ingest replaces, never
+  duplicates (same idempotency contract as M2 fact ingestion).
+- **Segmentation is best-effort with an honest fallback**, biased toward NOT
+  matching: a missed header loses a label (text merges, retrieval still
+  works); a wrong header lies about every chunk after it. Four guards, all
+  derived from inspecting a real MSFT 10-K: TOC dot leaders, trailing page
+  number, empty/digit-only title, 200-char line cap; plus same-item repeat
+  absorption (per-page running headers) with re-entry allowed after a
+  different item.
+- **Section names come from the header's TITLE, not the item number** (see
+  bugs below — item numbers are form-dependent and the number-based map
+  demonstrably lied about live 10-Q content). Fallback is generic `item_N`:
+  we know which item it is and invent no content claim we can't support.
+- **Single collection + per-chunk metadata** rather than per-company
+  collections: metadata filters answer "only MSFT MD&A" just as well, while
+  keeping the schema fixed as companies are added.
+- **L2-normalized embeddings ↔ cosine space**, set at collection creation.
+  Normalization lives with the producer (embedder), so any consumer — Chroma,
+  numpy, a test — sees unit vectors; mixing storage space and normalization
+  would silently degrade retrieval.
+- **Chunk overlap of ~300 chars** for boundary continuity; cost is duplicate
+  retrieval at seams — accepted, documented, visible in results.
+- **No fiscal-year labeling on chunks.** Chunks cite accession numbers, and
+  accessions already join to `FinancialFact` (M2) — fiscal context comes from
+  the facts table instead of a duplicated label that could drift.
+- **Amendments (`10-K/A`, `10-Q/A`) excluded** — they restate the original
+  document and would duplicate sections in retrieval.
+- **`filings.recent` only** (≈1000 most recent); older filings in
+  `filings.files` not paginated — 20 years of 10-K/10-Q is ~100 filings per
+  company, far beyond demo needs. Documented limitation.
+- **Tests never load torch.** `SentenceTransformerEmbedder` loads lazily on
+  first use; unit tests inject `FakeEmbedder` (crc32, not salted `hash()` —
+  salted hashing would make vectors differ per process and tests flaky).
+  The live run exercises the real model.
+
+### Real-data bugs found & fixed (during M4)
+
+1. **`chunk_section` walked the FULL paragraph list instead of the section's
+   slice.** Every section would have chunked the *entire document*
+   (duplicated text across sections, negative `para_start`). Caught by
+   `test_para_indices_reference_filing_wide_list` before a single live
+   ingestion — pure-function testing paid for itself here.
+2. **Over-segmentation on the live 10-K: 145 sections** (17 `mdna`,
+   13 `business`, 41 `financial_statements` for a document that has one of
+   each). Diagnosed by printing every offending header line:
+   `line 60: 'Item 1.'` = TOC cells (title in a separate table cell),
+   `line 159/181/200: 'Item 1'` = per-page running headers. Fixes: (a) a
+   header must carry a non-empty non-digit title; (b) the trailing-page-number
+   regex `_TOC_PAGE_RE` existed but was **never wired in** — now applied;
+   (c) same-item repeats absorbed while inside that item's section. Result:
+   10-K 145 → **24 sections**, 10-Q 77 → **10 sections**.
+3. **Number-based section naming lied about every 10-Q.** Live header lines
+   vs. labels: `ITEM 1. FINANCIAL STATEMENTS` → labeled `business`;
+   `ITEM 2. MANAGEMENT'S DISCUSSION...` → labeled `properties`;
+   `ITEM 3. QUANTITATIVE AND QUALITATIVE...` → labeled `legal_proceedings`.
+   Root cause: item numbers are form-dependent (10-K Item 2 = Properties,
+   10-Q Part I Item 2 = MD&A, 10-Q Part II Item 2 = Unregistered Sales).
+   Fix: `_TITLE_RULES` keyword mapping over the header's own title, matched
+   lowercase, apostrophe-free patterns (extracted titles carry varying
+   apostrophe encodings), generic `item_N` fallback. Re-verified live across
+   all three companies' 10-Qs: zero mislabels.
+4. **Orphan chunks after a chunking-code change** — upsert-by-id leaves stale
+   ids behind when the new parse generates fewer/different ids. Fixed with
+   delete-then-insert; test simulates an orphan id and asserts it's removed.
+5. **Chroma `EphemeralClient` shares one in-memory DB per process** — test
+   data leaked between tests (count 8 instead of 1). Fixed with per-test
+   `tmp_path` PersistentClient, which also exercises the real disk path.
+6. **`Settings` validator rejected the test fixture's `example.com` email.**
+   Tests now use a `.local` address — honest, because MockTransport
+   intercepts every request and no SEC traffic ever happens.
+7. **A "bug" that was actually the test's fault (twice):** a 181-char
+   cross-reference line sat *under* the 200-char guard so the parser matched
+   it correctly; and a rejected TOC line at index 0 correctly yields a
+   leading `unknown` section. Both fixed by correcting expectations and
+   adding explicit boundary tests — the guard was never broken.
+8. **`XMLParsedAsHTMLWarning` noise** — filings are XHTML-flavored
+   (`<?xml?>` declaration over HTML that only the HTML parser recovers
+   from). That *specific* warning is filtered with justification; all other
+   warnings stay visible.
+
+### Tests performed (all executed, outputs shown in session)
+
+- `python -m pytest -q` → **202 passed** (135 at M3 close → 202; +67 M4
+  tests: extraction guards, segmentation guards incl. boundary cases,
+  chunking invariants, submissions parsing, client extensions over
+  MockTransport, pipeline wiring, vector store filters/idempotency).
+- Live `ingest_filings.py MSFT --limit 2` (first run): model downloaded
+  (~90 MB one-time), 387 chunks stored, exit 0.
+- After segmentation fixes, re-run: both filings `[cached HTML]` (zero SEC
+  document traffic), 10-K 145→24 sections, store exactly **283** — old 387
+  replaced, proving delete-then-insert live.
+- Live `ingest_filings.py MSFT AAPL NVDA --limit 2` → **6 filings, 542
+  chunks, 0 failed**, exit 0 (MSFT replaced in place; AAPL/NVDA downloaded).
+- Live `search_filings.py` demos, all correct with provenance:
+  - "export controls and international sales restrictions" → top-3 NVDA
+    `risk_factors` passages (distances 0.225/0.262/0.286).
+  - same query with `--section mdna` → only MD&A chunks across NVDA/AAPL.
+  - "cybersecurity and data protection risks" → MSFT `risk_factors` +
+    `cybersecurity` (Item 1C, named from its title) — no cross-section bleed.
+- Post-fix 10-Q label audit across all three companies: `financial_statements`,
+  `mdna`, `market_risk`, `controls_and_procedures`,
+  `unregistered_sales_of_equity`, `mine_safety_disclosures` — correct.
+
+### Current limitations / next steps
+
+- Section detection is header-regex based; filings with unusual formatting
+  degrade to larger `unknown`/merged sections (never wrong labels by design,
+  but a heading-styled `<h*>` heuristic could help someday).
+- One collection, no per-filing *score* recalibration: raw cosine distances
+  are comparable within a query but not across queries.
+- `search_filings.py` is a script, not an API — M9 wraps retrieval behind
+  FastAPI; the LLM agent (M5/M6) will call `VectorStore.search` directly.
+- Chunk overlap duplicates boundary text — retrieval can return two chunks
+  containing the same sentence; dedup/reranking is a future (M8-era) concern.
+
+### Next milestone
+
+**M5 — Multi-provider LLM manager:** Groq primary / Gemini fallback / Ollama
+optional behind one interface, with timeouts, provider failover, and prompt
+construction that keeps LLMs out of arithmetic entirely (all financial math
+stays in the deterministic, provenance-carrying engine).
+
+---
+
+### M4 — Technical interview corner (5 questions + answers)
+
+**Q1. Your section segmentation looked right in tests but produced 145
+sections on a real 10-K. What actually happened, and what does that teach?**
+The fixtures reflected *my* mental model of a filing, not filings themselves.
+Real documents carry two things no fixture had: TOC rows where "Item 7." sits
+alone in a table cell (title in the next cell), and running page headers
+repeating "Item 1" at the top of every page. I diagnosed it by printing every
+offending header line rather than guessing, then fixed it with guards derived
+from that evidence (title-required, trailing page number, same-item
+absorption). The lesson: **unit tests prove your rules are implemented;
+only live data proves your rules are right.** Also, one guard
+(`_TOC_PAGE_RE`) existed in code but was never wired in — dead code that
+looked like protection.
+
+**Q2. Item numbers are the obvious key for naming sections. Why did you
+throw that away?**
+Because the same number means different things per form: 10-K Item 2 is
+Properties, 10-Q Part I Item 2 is MD&A, 10-Q Part II Item 2 is Unregistered
+Sales. The number-based map labeled a live 10-Q's MD&A as "properties" and
+its financial statements as "business" — a *wrong label* is worse than no
+label, because every consumer downstream (filters, citations, the LLM) trusts
+it. Naming now reads the header's own title text — the evidence the filer
+itself wrote — and falls back to a generic `item_N` when the title carries no
+recognized keyword. That fallback is deliberate honesty: we know which item
+it is; we don't invent a content claim we can't support.
+
+**Q3. Why does every SEC request — JSON and document bytes — flow through
+one `_get_response` method?**
+Because the SEC's rules (identified User-Agent, ≤10 req/s, retry etiquette)
+are properties of the *traffic*, not of individual endpoints. Two code paths
+means two chances for drift: rate limiting tuned in one, not the other; a
+retry policy updated in one, forgotten in the other. One choke point makes
+the policy a single point of truth, and it's exactly where tests hook in via
+`httpx.MockTransport`. The refactor also kept M1's 25 tests green — behavior
+had to be provably unchanged, so the tests doubled as a safety net for the
+refactor.
+
+**Q4. You use idempotent upserts everywhere — why did filings still need
+delete-then-insert?**
+Upsert is idempotent only when regeneration is *deterministic*: same input,
+same ids. But chunking is code, and when I fixed segmentation (145 → 24
+sections), the new parse generated different, fewer ids — upsert would have
+replaced the shared ids while leaving every stale id the new code no longer
+produces. Those orphans would surface as retrieval hits from an old parse
+with no way to tell them apart. So "re-process this filing" is now defined as
+**replace the filing's entire chunk set**: `delete_filing(accession)` before
+upsert. A test plants an orphan id and asserts it's gone. The deeper lesson:
+idempotency contracts must state *what happens when the producer changes*,
+not just when it runs twice.
+
+**Q5. Embeddings are behind an interface with a fake implementation. Isn't a
+fake testing nothing valuable?**
+The fake tests the *wiring*, which is where the real bugs were: a fake that
+hashes tokens with crc32 (never Python's salted `hash()`, which differs per
+process) gives deterministic, unit-length vectors where identical texts score
+distance 0 and shared-token texts rank above disjoint ones — enough to prove
+download → extract → chunk → embed → store → search end-to-end, including
+metadata filters and the failure paths, in milliseconds with no model
+download. What the fake *cannot* test — retrieval quality, model behavior —
+goes to the golden dataset (M8), not to unit tests. Separately, the real
+embedder is exercised live: 542 chunks from 6 real filings, and the query
+demos returned the right sections at sensible distances. Fake for wiring,
+golden set for quality, live run for integration — three layers, each
+answering a different question.

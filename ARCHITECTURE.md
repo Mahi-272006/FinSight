@@ -107,24 +107,35 @@ All functions are pure (same input → same output, no I/O) so they are triviall
 unit-testable — tests compare against values we hand-verified from actual SEC
 filings, with a numeric tolerance for float rounding.
 
-### 2.4 RAG Pipeline (`app/ingestion/` → ChromaDB)
+### 2.4 RAG Pipeline (`app/ingestion/` → ChromaDB — implemented in M4)
 
-**Input:** a filing URL (10-K / 10-Q / selected 8-K).
+**Input:** a filing URL (10-K / 10-Q; amendments excluded).
 **Output:** searchable chunks with full metadata.
 
 ```
-download HTML → parse (lxml) → locate sections (MD&A, Risk Factors, ...)
-→ clean text → chunk (~500 tokens, 50 overlap) → embed locally
-→ store in ChromaDB with metadata → semantic search at query time
+download HTML (cache-first, byte-for-byte) → parse (lxml) → segment at Item
+headers (4 anti-false-positive guards; section names from the header TITLE,
+not the item number, because numbers are form-dependent) → chunk (2400 chars,
+300 overlap) → embed locally → delete-then-insert into ChromaDB (one
+collection, cosine space, ids `{accession}:{chunk_index}`) → semantic search
+at query time
 ```
 
 - **Embeddings run locally** (`all-MiniLM-L6-v2`, 384 dimensions, ~90 MB).
   No text ever leaves the machine for embedding — a deliberate privacy and
-  cost choice.
-- **Metadata on every chunk:** company, CIK, filing type, filing date,
-  reporting period, accession number, section heading, source URL, chunk ID.
+  cost choice. Vectors are L2-normalized at the producer, matching the
+  collection's cosine space.
+- **Metadata on every chunk:** CIK, ticker, form, accession, filing date,
+  report date, section, item number, chunk index.
   This is what makes citations possible: a retrieved passage *is* its own
-  citation.
+  citation. Fiscal-year context is NOT duplicated onto chunks — accessions
+  already join to `FinancialFact` (M2), so there is one source of truth.
+- **Segmentation is best-effort with an honest fallback**, biased toward
+  *not* matching: a missed header loses a label (retrieval still works); a
+  wrong header would lie about every chunk after it. Unrecognized text
+  becomes `unknown`, never a guessed section.
+- **Re-ingestion replaces a filing's whole chunk set** (delete-then-insert):
+  upsert-by-id alone would orphan chunks when the chunking code changes.
 - **Untrusted content.** Filing text is data, never instructions. Retrieval
   results are wrapped and delimited when passed to the LLM, and the system
   prompt explicitly forbids following instructions found inside documents

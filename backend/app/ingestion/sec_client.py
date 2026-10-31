@@ -35,6 +35,10 @@ logger = get_logger(__name__)
 # SEC endpoints
 TICKER_FILE_URL = "{files_url}/files/company_tickers.json"
 COMPANY_FACTS_URL = "{base_url}/api/xbrl/companyfacts/CIK{cik:010d}.json"
+# data.sec.gov/submissions/ lists every filing a company has made (form type,
+# accession number, primary document filename, dates). It is the correct entry
+# point for downloading actual filing documents -- no HTML scraping needed.
+SUBMISSIONS_URL = "{base_url}/submissions/CIK{cik:010d}.json"
 
 
 class SECClientError(Exception):
@@ -169,6 +173,33 @@ class SECClient:
         logger.info("Fetching company facts for CIK %010d", cik)
         return self._get_json(url)
 
+    def get_submissions(self, cik: int) -> dict[str, Any]:
+        """Fetch the filing index (submissions payload) for a CIK.
+
+        The payload's `filings.recent` section holds parallel arrays
+        (accessionNumber / filingDate / form / primaryDocument ...) covering
+        the most recent ~1000 filings; older filings live in the extra files
+        listed under `filings.files` (M4 processes `recent` only).
+        """
+        if cik <= 0:
+            raise SECClientError(f"Invalid CIK: {cik}")
+        url = SUBMISSIONS_URL.format(base_url=self._settings.sec_base_url, cik=cik)
+        logger.info("Fetching submissions for CIK %010d", cik)
+        return self._get_json(url)
+
+    def get_bytes(self, url: str) -> bytes:
+        """Download a raw document (e.g. a filing's primary HTML) as bytes.
+
+        Byte-faithful by design, same rule as raw JSON storage: we never
+        re-encode at this stage. Filing HTML goes to disk exactly as SEC
+        served it, so the on-disk file is the audit trail for everything
+        extracted from it (text, sections, chunks).
+        """
+        response = self._get_response(
+            url, accept="text/html,application/xhtml+xml,*/*"
+        )
+        return response.content
+
     def save_raw(self, payload: dict[str, Any], cik: int) -> Path:
         """Persist a raw API payload byte-for-byte under data/raw/.
 
@@ -208,12 +239,18 @@ class SECClient:
             self._ticker_cache = self._get_json(url)
         return self._ticker_cache
 
-    def _get_json(self, url: str) -> dict[str, Any]:
-        """GET a URL as JSON with rate limiting + bounded retries.
+    def _get_response(
+        self, url: str, accept: str = "application/json"
+    ) -> httpx.Response:
+        """GET a URL with rate limiting + bounded retries; return the response.
 
         Retry policy (deliberately asymmetric):
         - 429 / 5xx / network errors -> transient; retry with backoff.
         - 400 / 403 / 404 -> our fault or permanent; fail immediately.
+
+        This is the single choke point for ALL SEC traffic (JSON APIs and raw
+        document downloads alike), so rate limiting and retry behavior cannot
+        drift between endpoints. Callers decide how to interpret the body.
         """
         max_retries = self._settings.sec_max_retries
         backoff_base = self._settings.sec_backoff_base_seconds
@@ -221,7 +258,7 @@ class SECClient:
         for attempt in range(max_retries + 1):
             self._limiter.wait()
             try:
-                response = self._http.get(url)
+                response = self._http.get(url, headers={"Accept": accept})
             except (httpx.TimeoutException, httpx.NetworkError) as exc:
                 # Network-level problems: server unreachable, connection reset.
                 # Transient by nature -> retry.
@@ -240,12 +277,7 @@ class SECClient:
             status = response.status_code
 
             if status == 200:
-                try:
-                    return response.json()
-                except json.JSONDecodeError as exc:
-                    # A 200 with a corrupt body is rare but possible (proxy
-                    # interference). Treat as transient server problem.
-                    raise SECServerError(f"Invalid JSON from {url}: {exc}") from exc
+                return response
 
             if status == 429 or status >= 500:
                 if attempt == max_retries:
@@ -277,6 +309,16 @@ class SECClient:
                 )
             # Any other status (400, etc.) is a client-side bug: fail loudly.
             raise SECClientError(f"Unexpected HTTP {status} from {url}")
+
+    def _get_json(self, url: str) -> dict[str, Any]:
+        """GET a URL as JSON (thin wrapper over `_get_response`)."""
+        response = self._get_response(url)
+        try:
+            return response.json()
+        except json.JSONDecodeError as exc:
+            # A 200 with a corrupt body is rare but possible (proxy
+            # interference). Treat as transient server problem.
+            raise SECServerError(f"Invalid JSON from {url}: {exc}") from exc
 
 
 def _normalize_entry(entry: dict[str, Any]) -> dict[str, Any]:
