@@ -56,13 +56,32 @@ class Settings(BaseSettings):
     data_filings_dir: Path = BACKEND_ROOT / "data" / "filings"
     logs_dir: Path = BACKEND_ROOT / "logs"
 
-    # --- LLM providers (used from M5; validated there, not here) ---
+    # --- LLM providers (M5; free tiers only -- no paid provider code exists) ---
     groq_api_key: str = ""
     gemini_api_key: str = ""
+    # llm_model = model for the PRIMARY provider in the chain (Groq default);
+    # fallback_llm_model = model for the SECONDARY provider (Gemini).
+    # Per-provider because the chain order is configurable, but model IDs are
+    # provider-specific (Groq's are namespaced like "openai/gpt-oss-20b").
     llm_model: str = "openai/gpt-oss-20b"
-    fallback_llm_model: str = ""
+    fallback_llm_model: str = ""      # empty -> code default "gemini-2.5-flash"
     ollama_base_url: str = "http://localhost:11434"
-    ollama_model: str = ""
+    ollama_model: str = ""            # required only when "ollama" is in the chain
+    # Comma-separated failover chain, tried in order. Providers with no
+    # credentials are skipped (logged), never silently replaced by a paid
+    # alternative; an empty resulting chain raises LLMConfigurationError.
+    llm_provider_chain: str = "groq,gemini"
+    llm_timeout_seconds: float = 30.0
+    # 2048, not 1024: reasoning models (gpt-oss) spend completion budget on
+    # their reasoning channel too -- at 1024 the live demo answer was cut
+    # mid-citation. Still bounded; still free-tier friendly.
+    llm_max_tokens: int = 2048
+    # Low by design: the analyst quotes evidence, it does not creative-write.
+    llm_temperature: float = 0.1
+    # Total retrieved-context budget for one prompt (chars). Bounds prompt
+    # size so an oversized context cannot trigger provider 400s -> failover
+    # storms, and defines which (lowest-ranked) chunks get truncated first.
+    prompt_context_chars: int = 16_000
 
     # --- Database (wired in M2) ---
     database_url: str = ""
@@ -87,6 +106,27 @@ class Settings(BaseSettings):
                 "SEC_USER_AGENT still contains a placeholder email. "
                 "Replace it with your real contact address in backend/.env."
             )
+        return value
+
+    @field_validator(
+        "data_raw_dir", "data_processed_dir", "data_filings_dir",
+        "logs_dir", "chroma_persist_directory",
+    )
+    @classmethod
+    def _resolve_relative_paths(cls, value: Path) -> Path:
+        """Anchor relative paths at BACKEND_ROOT, never at the CWD.
+
+        .env.example ships CHROMA_PERSIST_DIRECTORY=./data/chroma_db. Resolved
+        against the *current working directory*, that silently points somewhere
+        different depending on where the process was started: an M5 probe run
+        from the repo root opened a brand-new EMPTY Chroma store (zero hits,
+        and a stray chroma.sqlite3 created outside backend/) while the same
+        script from backend/ found all 542 chunks. Anchoring relative values        at BACKEND_ROOT makes behavior cwd-independent; absolute values
+        (including user overrides) pass through untouched.
+        """
+        value = Path(value)
+        if not value.is_absolute():
+            value = BACKEND_ROOT / value
         return value
 
     def ensure_directories(self) -> None:

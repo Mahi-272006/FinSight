@@ -174,29 +174,48 @@ The detector has two layers by design:
   Every signal carries the explicit "NOT a finding of misstatement"
   framing; this caveat also appears in the UI, the API, and the docs.
 
-### 2.6 LLM Manager (`app/services/llm_manager.py`)
+### 2.6 LLM Manager (`app/services/llm_manager.py` + `llm_providers.py` + `prompting.py` — implemented in M5)
 
-**Input:** messages + tool schemas.
-**Output:** normalized provider response + metadata (which provider answered,
-latency, failures).
+**Input:** messages (LangChain `SystemMessage`/`HumanMessage`, which M6's
+LangGraph consumes natively).
+**Output:** `LLMResponse` — text + provenance (provider, model, in/out
+tokens, latency).
 
-A multi-provider abstraction so the rest of the app never touches Groq/Gemini/
-Ollama directly:
+A multi-provider abstraction so the rest of the app never touches Groq/
+Gemini/Ollama directly. Providers sit behind a small `LLMProvider` protocol;
+`LLMManager.generate()` walks the configured chain in order:
 
-- **Primary:** Groq (fast, free tier, tool-calling capable models).
-- **Fallback:** Google Gemini — on *transient* errors only (429, 5xx,
-  timeout, connection error). Auth errors (bad key) do **not** trigger fallback;
-  they fail fast with a clear message.
-- **Optional local:** Ollama, if configured and reachable.
-- **Resilience:** bounded retries, exponential backoff, a circuit breaker
-  (after N consecutive failures a provider is skipped for a cool-down window),
-  and per-request logging of provider/latency/errors to a `ProviderEvent` table.
-- **Tool-calling normalization:** each provider has slightly different tool-call
-  message formats; the manager converts them to one internal shape so the agent
-  code is provider-agnostic.
-- **Testing without quota burn:** fallback behavior is tested with *mocked*
-  failures (injected 429/500/timeouts), so we never need to exhaust real API
-  limits to prove resilience.
+- **Primary:** Groq (free tier; `openai/gpt-oss-20b` by default) and
+  **fallback:** Google Gemini (free tier; `gemini-3.5-flash`, live-verified)
+  via the installed LangChain integrations; **optional local:** Ollama via a
+  hand-rolled `/api/chat` client over injectable httpx (no extra dependency).
+- **Failover policy (as built):** ANY provider failure — rate limit, auth,
+  timeout, connection, malformed response, even unexpected exceptions — is
+  logged with its cause and fails over to the next provider; if the whole
+  chain fails, one `LLMAllProvidersFailed` error carries every
+  `(provider, cause)`. Configuration errors (empty chain, unknown provider,
+  missing model) raise immediately instead: failover cannot fix config.
+  *Deliberate simplification vs. the original plan:* no per-provider
+  retries/backoff or circuit breaker yet (`max_retries=0` on the SDKs so
+  failover timing stays deterministic); auth errors fail *over* rather than
+  fast because they are visible both in logs and in the aggregated error.
+  Hardening adds backoff + a `ProviderEvent` table; the protocol seam means
+  none of that touches callers.
+- **Zero-cost guard:** only free-tier implementations exist in code;
+  providers without keys are skipped (logged), and an emptied chain raises
+  `LLMConfigurationError` with setup instructions. No silent paid fallback,
+  ever.
+- **Grounded prompting (`prompting.py`):** the system prompt carries the
+  project's constitution (untrusted `<document>` content, NO ARITHMETIC,
+  the four evidence tiers, citation form); retrieved chunks are delimited
+  with provenance attributes and truncated to a char budget from the
+  lowest-ranked up; `used_hits` is returned so answers can only cite what
+  was actually in the prompt.
+- **Testing without quota burn:** adapters take injectable runnables/
+  transports, and the manager is tested entirely against fake providers —
+  injected 429/401/timeout/connection failures prove the failover matrix
+  offline. One live test drove the real `ChatGroq` over
+  `httpx.MockTransport` to prove the seam holds for the actual SDK.
 
 ### 2.7 LangGraph Research Agent (`app/graph/`)
 

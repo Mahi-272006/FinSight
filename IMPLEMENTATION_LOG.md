@@ -742,3 +742,258 @@ embedder is exercised live: 542 chunks from 6 real filings, and the query
 demos returned the right sections at sensible distances. Fake for wiring,
 golden set for quality, live run for integration — three layers, each
 answering a different question.
+
+---
+
+## M5 — Multi-provider LLM Manager (Groq / Gemini / Ollama + grounded prompting)
+
+### What was built
+
+- `app/services/llm_providers.py` — the contract and the three adapters:
+  - Error taxonomy: `LLMError` → `LLMConfigurationError` (broken chain,
+    propagates immediately) / `LLMProviderError` (+ `LLMRateLimitError`,
+    `LLMAuthError`, `LLMTimeoutError`, `LLMNetworkError`, each carrying
+    `.provider` and `.status_code`) / `LLMAllProvidersFailed` (carries every
+    `(provider, cause)` from the whole chain).
+  - `LLMResponse` provenance dataclass (text, provider, model, in/out tokens,
+    latency_ms) — the model that produced an LLM INTERPRETATION travels with
+    it, the same provenance discipline M2 applied to numbers.
+  - `LLMProvider` protocol (the failover seam); `GroqProvider` /
+    `GeminiProvider` over the installed `langchain-groq` /
+    `langchain-google-genai` runnables (injectable for tests);
+    `OllamaProvider` hand-rolled over injectable httpx.
+  - `_classify()` normalizes any provider exception into the taxonomy via
+    duck-typed status attributes (`status_code`, `code`, and
+    `.response.status_code` for httpx HTTPStatusError) plus class-name
+    heuristics — no isinstance chains across four libraries.
+  - `build_providers()` — the zero-cost guard: skips providers whose key is
+    missing/unusable (placeholder markers count as unset), and an emptied
+    chain raises `LLMConfigurationError` with free-tier setup URLs. No code
+    path exists to any paid API.
+- `app/services/llm_manager.py` — `LLMManager.generate()` walks the chain in
+  order; any provider failure is logged with its cause and fails over; all
+  failures aggregate into `LLMAllProvidersFailed`. Context-manager closes
+  providers. `build_manager(settings)` wires settings → chain → manager
+  entirely offline.
+- `app/services/prompting.py` — `SYSTEM_POLICY` (untrusted `<document>`
+  content, NO ARITHMETIC, the four evidence tiers, citation form, honesty
+  rules) and `build_grounded_messages()`: delimited context blocks with
+  provenance attributes, budget truncation from the lowest-ranked hit up,
+  embedded `</document>` escaped, and `used_hits` returned so callers can
+  only cite what was actually provided.
+- `scripts/ask_filings.py` — the M5 integration demo: M4 retrieval → grounded
+  prompt → failover generate → answer + provider/model provenance + the
+  exact citations the model saw.
+- Config: `llm_provider_chain`, `llm_timeout_seconds`, `llm_max_tokens`,
+  `llm_temperature`, `prompt_context_chars`; plus a field validator that
+  anchors all relative data/log paths at `BACKEND_ROOT` (see bugs below).
+
+### Key design decisions
+
+1. **LangChain integrations behind our own narrow manager** — a mid-design
+   revision, made *after reading requirements.txt*: `langchain-groq` and
+   `langchain-google-genai` were already installed in M0 because M6's
+   LangGraph consumes LangChain message objects natively. So the message
+   type in this layer IS `langchain_core` messages (no conversion layer),
+   provider quirks stay in the SDKs, and *our* failover policy, error
+   taxonomy, zero-cost guard, and provenance stay ours. Ollama is the
+   exception: `langchain-ollama` is not installed, its `/api/chat` is one
+   stable JSON POST, and a hand-rolled adapter gets the cleanest
+   MockTransport tests — zero new dependencies.
+2. **`max_retries=0` on both SDK clients.** SDK-internal retries hide rate
+   limits behind silent backoff and make failover timing nondeterministic.
+   Failover IS the retry strategy: generation has no side effects, so
+   trying the next provider is always safe. Accepted cost: a Groq 429
+   spends Gemini quota instead of waiting — both are free, revisited in
+   hardening.
+3. **Failover on ANY provider failure, aggregated.** Even unexpected
+   exceptions fail over (recorded with class name); configuration errors
+   propagate immediately (the next provider cannot fix a broken chain).
+   If the whole chain fails, one readable error lists every cause — all
+   auth errors ⇒ misconfiguration; all timeouts ⇒ outage.
+4. **Constructor-time generation knobs, not per-call.** Probing the real
+   classes offline showed `temperature`/`max_tokens`/`timeout` are
+   constructor fields (ChatGroq: `request_timeout`, `groq_api_key`,
+   injectable `http_client`; ChatGoogleGenerativeAI: `timeout`,
+   `max_output_tokens`, `google_api_key`), so `generate(messages)` is the
+   entire call API — the narrowest seam that still works.
+5. **No-arithmetic is architectural, not guaranteed.** The LLM gets no
+   tools and is never asked to compute; numbers arrive pre-computed from
+   the M2 engine with provenance. A prompt policy backs it up; M8's
+   arithmetic-trap tests measure leaks (a live trap probe in this
+   milestone already showed the model quoting figures and explicitly
+   deferring the calculation to the deterministic engine).
+6. **Citation honesty is a return-value property.** `build_grounded_messages`
+   returns `used_hits`; the CLI prints exactly those — an answer may only
+   cite context that was actually inside the prompt, which no prompt text
+   can enforce by itself.
+
+### Real-data bugs found & fixed (during M5)
+
+1. **UnicodeEncodeError after a successful completion** — the model's answer
+   contained U+2011 (non-breaking hyphen); the cp1252 Windows console
+   crashed the script *after* paying 1.8 s of latency. Fixed at the stream
+   level (`reconfigure(encoding="utf-8", errors="replace")`) — model output
+   is data, garbled glyphs beat dead runs (same lesson as M4's ASCII policy,
+   opposite tactic, because the content isn't ours to filter upstream).
+2. **Silent truncation at 1024 output tokens** — `gpt-oss` spends completion
+   budget on its reasoning channel too; the live answer was cut
+   mid-citation at exactly 1024. Default raised to 2048 with the reason
+   recorded in config.
+3. **Citation example-leak** — the policy's concrete example
+   (`[MSFT 10-K ... section:mdna]`) was *copied into* citations of
+   `risk_factors` documents (model wrote `risk_factors:mdna`). Rewritten
+   with placeholder form + "never values copied from any example".
+4. **Retired model ID, twice, in one direction** — `gemini-2.5-flash` →
+   404 "no longer available to new users". This failure *proved the
+   machinery*: the all-fail run aggregated Groq's 401 and Gemini's 404
+   into one perfect error. Google's suggested replacement
+   `gemini-3.8-flash` then **hung** on generateContent from this network —
+   a timeout-scaling probe (died at both the 30 s and the 90 s client
+   deadline ⇒ server-side hold, not a short client timeout; the
+   models-list endpoint answered instantly, so the endpoint is reachable
+   and the key is authorized for that model) plus a 3-model sweep found
+   `gemini-3.5-flash` answering in 7 s → verified default. Model lists
+   drift AND availability varies by network: config-not-hardcode
+   vindicated twice in one session.
+5. **Classifier gaps exposed by live errors** — `httpx.HTTPStatusError`
+   stores the status at `.response.status_code` (and *our own* Ollama
+   adapter raises exactly that shape — a test now covers it);
+   `google.api_core.DeadlineExceeded` contains no "timeout" substring →
+   "deadline" added to the name heuristics.
+6. **Relative Chroma path resolved against the CWD** (M0 leftover) —
+   `.env` ships `CHROMA_PERSIST_DIRECTORY=./data/chroma_db`; from
+   `backend/` the store showed all 542 chunks, from the repo root the same
+   script saw an EMPTY store and created a stray `chroma.sqlite3` outside
+   `backend/` (removed). Fixed with a `Settings` field validator anchoring
+   all five Path fields at `BACKEND_ROOT`, plus regression tests including
+   an explicit cwd-independence test. Found because an arithmetic-trap
+   probe mysteriously retrieved 0 chunks.
+7. Test-side errors, fixed honestly: langchain-core's `UsageMetadata`
+   requires `total_tokens`; a Gemini-shaped test key contained the literal
+   word "example" — which our own placeholder detector rejects.
+
+### Tests performed (all executed, outputs shown in session)
+
+- `python -m pytest -q` → **284 passed** (202 at M4 close → 274 after the
+  72 M5 provider/manager/prompting tests → 284 after the 10 new Settings
+  path-anchoring tests).
+- Offline constructor probes (Rule 4 before coding): inspected real
+  `ChatGroq`/`ChatGoogleGenerativeAI` field lists and built both with
+  dummy keys — no network — to pin exact kwargs (`request_timeout`,
+  `max_retries=0`, `max_output_tokens`, injectable `http_client`).
+- Live happy path: `ask_filings.py "export controls..." --ticker NVDA
+  --section risk_factors` → served by `groq/openai/gpt-oss-20b`, 1929 ms,
+  complete answer with per-claim citations using actual document
+  attributes, clean stderr (google FutureWarning filtered narrowly).
+- Live failover: corrupted Groq key in memory only (`.env` untouched) →
+  401 classified as auth → logged → `gemini-3.5-flash` served "OK"
+  (22.2 s), exit 0.
+- Live all-fail aggregation: both providers broken → single
+  `LLMAllProvidersFailed` listing groq's 401 and gemini's cause.
+- Live arithmetic trap: retrieved real NVDA financial-statement chunks,
+  the model quoted both revenue figures verbatim, wrote the formula, and
+  stated "The deterministic engine must perform this calculation; the
+  result is not provided here."
+- Gemini diagnostics: models-list probe (50 models authorized for the
+  key), timeout-scaling probe (30 s/90 s), 3-model sweep — all recorded
+  in the bug log above.
+
+### Current limitations / next steps
+
+- No in-provider retry/backoff: a Groq 429 fails over immediately instead
+  of waiting out seconds; deliberate (determinism) but a hardening item.
+- Gemini's live latency from this network (7–22 s) makes it a fallback of
+  last resort in practice; Groq serves the happy path.
+- No streaming — M10's UI may want SSE; the manager returns one response.
+- The injection defense is structural (delimiters + policy text), not
+  adversarially tested; M8's golden set should include injection probes.
+- Model citation *rendering* is inconsistent (CJK brackets, occasional
+  attribute mixups) — M6 must extract and verify citations
+  programmatically, never trust the model's formatting.
+- google.api_core warns that Python 3.10 is EOL (functional today; the
+  warning is filtered only at the gemini import site). A venv upgrade to
+  3.11+ is a project-level to-do, not an M5 change.
+
+### Next milestone
+
+**M6 — LangGraph research agent:** a stateful research loop over the M5
+seams (retrieve → answer → follow-up retrieval on gaps), with citations
+extracted and verified against the store, ready to sit behind the M9 API.
+
+---
+
+### M5 — Technical interview corner (5 questions + answers)
+
+**Q1. You designed hand-rolled httpx adapters, then threw it away for
+LangChain classes mid-mileage. Isn't that a wasted design?**
+It was a design invalidated by evidence: I had written the plan before
+reading `requirements.txt`, where M0 had already installed
+`langchain-groq`/`langchain-google-genai` because M6's LangGraph needs
+LangChain message objects anyway. Keeping my plan would have meant a
+conversion layer, hand-maintained wire formats for two providers, and
+duplication of what installed, maintained code already does. The part of
+the design that mattered — failover policy, error taxonomy, zero-cost
+guard, provenance — survived untouched, because it lived behind the
+`LLMProvider` protocol, not in the transports. The lesson I'd defend:
+**commit to interfaces, not implementations, and let newly-read evidence
+change the implementation for free.**
+
+**Q2. You fail over on *any* error, including 401 auth failures. Doesn't
+that hide misconfiguration behind "it works, sort of"?**
+Failover hides nothing because failures are never dropped: every attempt
+is logged with provider + cause, and if the chain is exhausted the single
+raised error lists *every* cause. A 401 is visible twice — in the warning
+log the moment it happens, and in the aggregated error if nothing else
+served. What failover buys is availability for the *user* while the
+operator still sees the truth; what it deliberately does not do is retry
+the same broken provider. And configuration errors that failover can't
+fix (empty chain, unknown provider name, missing OLLAMA_MODEL) raise
+immediately instead — the taxonomy separates "try the next one" from
+"stop and fix your config" by testing what the next call could possibly
+change.
+
+**Q3. How do you guarantee the LLM never performs financial arithmetic?**
+You don't guarantee a probabilistic system with words — you make the
+answer not require it. The architecture never gives the model a computing
+tool, and every number it could quote arrives pre-computed from the
+deterministic engine with provenance (formula, inputs, accession), so a
+correct answer never needs to calculate. The prompt states the rule, and
+we *measure* compliance: an arithmetic-trap probe asked the model to
+compute a YoY percentage change; it quoted both figures verbatim, wrote
+the formula, and said the deterministic engine must produce the result.
+That's the honest three-layer story — architectural prevention, prompt
+policy, empirical measurement (M8's golden set) — not "we trust the
+prompt."
+
+**Q4. Filing text goes into your prompt. How do you defend against prompt
+injection hidden in a document?**
+Structurally, then empirically. Structurally: retrieved text only ever
+appears inside `<document>` tags carrying provenance attributes, before
+the question, and the system prompt declares document content untrusted
+quotation material whose instructions are never followed — the question,
+the only thing phrased as an instruction, sits outside the tags. I also
+escape an embedded literal `</document>` in chunk text, because untrusted
+data must not be able to break the delimiter the defense rests on (tested).
+Empirically: this is prompt-level mitigation, not proof, so M8's golden
+set needs injection probes (documents that say "ignore previous
+instructions"), and M6's citation verification adds a second net —
+answers citing documents not actually retrieved are detectable
+programmatically regardless of what the text tried to do.
+
+**Q5. A provider's model ID retired mid-project, and the replacement the
+vendor recommended hung from your network. What's the systemic lesson?**
+Three, escalating. First, hardcoding provider model IDs is a time bomb —
+both IDs involved (`gemini-2.5-flash` at M0, `gemini-3.8-flash` as the
+vendor's own suggestion) were wrong within hours, which is why the model
+is config with a code default in exactly one documented place. Second,
+vendor error text is a diagnostic gift: the 404 named the replacement,
+and I used Google's own models-list endpoint to separate "key not
+authorized" (it was) from "model hangs" (it did) before a
+timeout-scaling probe proved the hold was server-side, not my deadline —
+each probe designed to kill one hypothesis. Third, failover earns its
+keep precisely here: while Gemini flaked, Groq kept serving; while Groq's
+key was deliberately corrupted, the chain degraded to a working fallback —
+and when both broke, the aggregated error told the whole story in one
+line. Nondeterministic vendors are exactly why the boring parts —
+classification, aggregation, provenance — must be ours.

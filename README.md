@@ -151,7 +151,7 @@ SEC fair-access policy: max 10 requests/second, identify yourself in
 | M2 | Normalization + financial engine + PostgreSQL | ✅ |
 | M3 | Peer comparison + anomaly detection | ✅ |
 | M4 | Filing RAG pipeline | ✅ |
-| M5 | Multi-provider LLM manager | ⬜ |
+| M5 | Multi-provider LLM manager | ✅ |
 | M6 | LangGraph research agent | ⬜ |
 | M7 | Investment thesis monitoring | ⬜ |
 | M8 | Golden dataset + evaluation framework | ⬜ |
