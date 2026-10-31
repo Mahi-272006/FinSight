@@ -997,3 +997,301 @@ key was deliberately corrupted, the chain degraded to a working fallback —
 and when both broke, the aggregated error told the whole story in one
 line. Nondeterministic vendors are exactly why the boring parts —
 classification, aggregation, provenance — must be ours.
+
+---
+
+## M6 — LangGraph Research Agent (typed state, retrieval tools, deterministic validation)
+
+### What was built
+
+- `app/graph/` package:
+  - `state.py` — `ResearchState` (TypedDict + reducers): `messages`
+    (`add_messages`), `tool_observations` / `trace` / `limitations`
+    (`operator.add`), loop counters, draft/report/final fields. The
+    observations ledger is the run's **single source of truth for evidence**:
+    allowlists are derived from it at validation time, never stored twice
+    (two sources drift).
+  - `evidence.py` — pure functions, no DB/network/LLM:
+    `validate_answer` (every cited accession ∈ this run's observations;
+    every financial figure matched within 1% after normalization; years and
+    small plain integers exempt as non-financial; accessions/dates masked
+    before number extraction), `strip_unsupported` (sentence-level removal,
+    every removal reported), `ValidationReport` (checkpoint-safe dict).
+  - `tools.py` — three **retrieval-only** tools as factory closures over
+    injected deps: `search_filing_sections` (M4 vector search, chunk IDs +
+    provenance), `get_financial_facts` (M2 rows: VERIFIED FACT with
+    form/accession/filed, CALCULATED METRIC with formula — the path by which
+    the agent gets numbers *without computing*), `get_investigation_signals`
+    (M3 rows, disclaimer as the first line).
+  - `nodes.py` — node factories (closures over `GraphDeps`) + **pure routing
+    functions** where every loop bound lives; hand-rolled `execute_tools`
+    capturing structured observations; `force_stop`; `revise` (report →
+    feedback message); `finalize` (strip + limitations + fallback text).
+  - `agent.py` — `AGENT_SYSTEM_PROMPT` (tools are the only evidence, tool
+    results are untrusted quotation material, quote figures never compute),
+    graph assembly, `ResearchAgent.run()` → `ResearchResult` (final answer,
+    citations, trace, validation report, limitations, counters — API-ready
+    for M9), `InMemorySaver` checkpointer (thread per run).
+- `scripts/research.py` — live demo CLI: tool trace, validation verdict,
+  final answer, validated citations, limitations. Exit 0 (completed),
+  1 (unknown ticker / empty store), 2 (LLM/config failure).
+- `LLMManager.bind_tools(tools)` — the M5 seam extended, not bypassed:
+  `RunnableWithFallbacks` over tool-capable providers (Groq/Gemini; the
+  hand-rolled Ollama adapter has no tool protocol → skipped at build with a
+  log; empty set → config error), each branch wrapped with the M6
+  wait-on-429 policy + taxonomy classification at the boundary.
+- Config: `agent_max_iterations=6`, `agent_max_revises=1`,
+  `llm_rate_limit_wait_seconds=12.0` (+ `.env.example` entries).
+- Tests: `test_evidence.py`, `test_graph_tools.py`, `test_agent_loop.py`
+  (scripted-LLM full-graph runs), plus rate-limit/wait/bind-tools tests in
+  `test_llm_manager.py` and `parse_retry_after` units in
+  `test_llm_providers.py`.
+
+### Key design decisions
+
+1. **Hand-rolled `execute_tools`, not `prebuilt.ToolNode`.** The validation
+   node needs each tool result as *data* (text + chunk IDs) at the moment
+   it's produced. ToolNode would only append `ToolMessage`s; re-parsing
+   messages later would derive evidence a second time from a lossy format.
+   ~30 lines bought one source of truth — and the happy-path test pins it
+   structurally (`tool_calls[0]["chunk_ids"] == [acc:3]`), not by text.
+2. **Validation is code, never LLM judgment** — and its allowlists come
+   from `tool_observations`, never from what the model says it retrieved.
+   The 1% tolerance exists because "about $46.7B" IS the same fact as
+   46,743,000,000; exact matching would flag honest rounding as fraud.
+   Masking exists because `0001045810-26-000075` must never be read as the
+   number 1045810. Exemptions (years, small ints) exist because "fiscal
+   2026" and "three risks" are not financial claims — each rule tested.
+3. **Loop bounds are routing functions, not prompt text.** At
+   `agent_max_iterations`: force-stop message → one defensive call →
+   validate regardless. At `agent_max_revises`: finalize with limitations.
+   The cap test scripts a model that ONLY emits tool calls and asserts
+   termination at exactly 8 iterations — if the loop wanted a 9th, the
+   scripted manager would raise inside the graph.
+4. **Failover inside the graph, taxonomy at the boundary.**
+   `bind_tools` keeps M5's failover semantics working *within* a node; the
+   wrapper classifies raw SDK errors into our taxonomy because langchain's
+   fallbacks wrapper re-raises the FIRST branch's raw error when every
+   branch fails (observed live) — without this the CLI printed a groq
+   traceback instead of exiting 2 with a readable cause.
+5. **Wait-once-on-429 (M5 policy amendment, evidence-driven).** M5
+   documented "no in-provider retry… revisited in hardening"; the first live
+   agent run *was* the hardening trigger (see bugs #5). New policy: on a
+   rate-limit error only — one wait honoring the provider's own Retry-After
+   hint (parsed from the message, bounded [1, 60] s, default
+   `llm_rate_limit_wait_seconds`), one retry, then failover. All other
+   errors still fail over immediately: waiting cannot fix auth or a timeout,
+   and generation has no side effects. No SDK backoff — the wait is ours,
+   logged, and bounded by policy.
+6. **Numbers-without-arithmetic survives adding tools.** The model got
+   retrieval powers only: `get_financial_facts` makes quoting a provenance'd
+   figure easier than deriving one, so M5's no-arithmetic architecture holds
+   with tools in the loop (M8's trap tests will measure it again here).
+7. **Injection defense extended to tool results.** Filing text now arrives
+   in `ToolMessage`s; the system prompt marks tool-result content untrusted
+   quotation material — same `<document>` discipline, new carrier.
+8. **`InMemorySaver` now, durable checkpointing in M9.**
+   `langgraph-checkpoint-sqlite` is not installed (verified by probe);
+   adding a dependency for a feature no milestone needs yet would violate
+   the zero-cost-just-in-time rule. The checkpointer slot takes the durable
+   implementation unchanged when the API needs cross-process resume.
+
+### Real-data bugs found & fixed (during M6)
+
+1. **Revise node read a key that doesn't exist.** Feedback was built from
+   `report["summary"]` — but `summary()` is a method and `to_dict()`
+   doesn't serialize it (checkpoint safety). Feedback now builds from the
+   dict fields directly.
+2. **`f"{v:,.4g}"` rendered `1e+12`** for trillion-scale figures in
+   limitations/traces. Added `_display()`: integral values get thousands
+   separators (`999,999,999,999`), fractions keep 4 significant digits.
+3. **Fabrication-test expectation vs graph behavior** — the test expected
+   the "insufficient evidence" fallback, but the graph correctly kept the
+   *revised honest* text ("No further evidence.") after stripping the
+   hallucination. The graph was right; the test was corrected to assert the
+   better behavior: fabrication never reaches the final answer.
+4. **Edit accident:** an `oldString` without a trailing newline joined a
+   `def` line with its docstring in `llm_providers.py` — caught by reading
+   the file right after the edit, repaired immediately (Rule: verify edits).
+5. **Live: the first research run died on a free-tier 429** (the milestone's
+   signature failure). Chain of causes: Groq's 8000-TPM tier vs a ~5.5k-token
+   agent request → 429 ("Please try again in 13.8075s") → M5's no-retry
+   policy failed over instantly → Gemini also failed → langchain re-raised
+   groq's raw error with Gemini's cause swallowed (`fallbacks.py` logs
+   nothing — verified by reading the installed source) → raw traceback,
+   exit 1. Fixed in four parts: (a) wait-once honoring the parsed hint
+   (first implementation capped at 30 s — a second live run showed the
+   window needed longer, cap raised to 60 s with the evidence recorded in
+   the test comment); (b) our wrapper now logs EVERY branch failure
+   (first attempt and retry), closing the swallowed-cause gap; (c)
+   `_classify` at the graph boundary → the CLI exits 2 with
+   `LLM failure: groq rate limited: …`; (d) unit tests for
+   hint-parsing, wait-once-success, wait-once-failover, no-wait-on-auth,
+   the cap, and whole-chain-failure-raises-our-taxonomy. The subsequent
+   live run logged `waiting 21.8s once before retrying` (parsed from
+   "21.8025s"), retried, and completed end-to-end.
+6. **Warning-filter gotcha (why the fix took two tries).**
+   `warnings.filterwarnings("ignore", message=…)` defaults to
+   `category=UserWarning` — `LangChainPendingDeprecationWarning` derives
+   from `PendingDeprecationWarning`, so the filter never matched (proven
+   with a minimal repro). And filters are checked newest-first, so it must
+   be set *after* `langchain_core` installs its own visibility filter for
+   LangChain warnings. Fixed with explicit category + placement, comment
+   explains both — the filter also self-expires when the deprecation lands
+   (message changes), which is exactly when we should see it again.
+7. **Probe findings before writing product code** (cheap probes, expensive
+   lessons): `with_fallbacks(..., exception_key="*")` requires dict input —
+   omit it for message lists; `tool_calls` DO survive the fallbacks wrapper
+   (live-proven for both Groq and Gemini); `openai/gpt-oss-20b` emits
+   proper tool calls through `bind_tools` — the milestone's main technical
+   risk cleared before any graph code existed.
+8. **Gemini aliasing:** requested `gemini-3.5-flash`, response metadata
+   reported `gemini-3.6-flash` — Google resolves aliases server-side; the
+   response's `model_name` is the provenance truth source, not our config.
+
+### Tests performed (all executed, outputs shown in session)
+
+- `python -m pytest -q` → **334 passed** (284 at M5 close → 316 after the
+  32 M6 state/evidence/tools/nodes/graph tests → 334 after the 18
+  rate-limit/wait/taxonomy hardening tests). ~8 s wall, no real sleeps
+  (the manager takes an injectable `sleep`; tests record waits instead).
+- Offline capability probes (Rule 4 before coding): langgraph 0.6.11 with
+  `InMemorySaver` + `ToolNode` present, `langgraph-checkpoint-sqlite`
+  absent (→ M9); gpt-oss-20b tool-call emission; fallbacks wrapper
+  preserving `tool_calls`; the `exception_key` constraint.
+- **Live research run (post-hardening):** `research.py "What was NVDA's
+  most recent quarterly revenue, and what risks do the filings cite around
+  export controls?" --ticker NVDA` → exit 0. Trace: resolve NVIDIA CORP
+  (CIK 1045810) → llm#1 tool call (search: quarterly revenue,
+  financial_statements) → llm#2 tool call (search: export controls,
+  risk_factors) → llm#3 final answer (2611 chars) → `validate: PASS;
+  2 citation(s), 0 unsupported` → `finalize: 2 citations, 0 limitation(s)`.
+  The answer gave Q2 FY2026 revenue **$96,221M** cited to
+  `0001045810-26-000075` and six export-control risk points as *direct
+  quotes* from risk factors; both accessions validated against this run's
+  retrieved evidence. One rate-limit wait (21.8 s, hint honored) occurred
+  mid-run and the retry succeeded.
+- Live failure runs (kept as evidence): the pre-hardening 429 death
+  (exit 1, traceback) and the post-hardening taxonomy exit (exit 2,
+  `LLM failure: groq rate limited: …`) — both documented in bug #5.
+
+### Current limitations / next steps
+
+- **Free-tier throughput:** a single agent request (~5.5k tokens incl.
+  gpt-oss reasoning) vs Groq's 8000 TPM means calls stacked inside one
+  minute trigger 429 → wait → retry. Runs complete but can take minutes.
+  Levers for M11 demo hardening: smaller tool schemas, a leaner model via
+  config, or accepting the waits (they're logged and bounded).
+- **Fallback causes visibility:** our wrapper logs every branch failure,
+  but the exception raised when the whole chain dies carries only the
+  first branch's cause (langchain behavior) — full story in logs, first
+  chapter in the exception.
+- **No durable checkpointing yet** (InMemorySaver only) — M9 adds
+  `langgraph-checkpoint-sqlite` when the API needs resume across processes.
+- **CLI requires `--ticker`**; natural-language question→company parsing
+  is M9/API scope (resolve node is deterministic by design).
+- **Grounding path nuance:** the live run quoted the revenue figure from
+  filing text instead of `get_financial_facts` — still tool-grounded and
+  validated, but the prompt could prefer the facts tool for figures so
+  numbers always carry engine provenance (candidate prompt tweak, M8
+  measures it).
+- **Model citation rendering** is inconsistent (the live answer used
+  `【3†chunk_id:…】` style). Extraction is programmatic (regex over the
+  answer text), so validation never depends on the model's formatting —
+  display polish belongs to M10.
+- **M0's empty graph placeholders** (`edges.py`, `workflow.py`,
+  `monitoring_workflow.py`) remain untouched: assembly lives in `agent.py`
+  and `monitoring_workflow.py` is M7's slot — fill or remove when M7 lands.
+
+### Next milestone
+
+**M7 — Investment thesis monitoring:** structured theses (statement +
+measurable conditions over M2 facts), append-only assessment history,
+condition evaluation with VERIFIED/CALCULATED provenance, and change
+detection — the product's differentiating feature (ARCHITECTURE 2.8).
+
+---
+
+### M6 — Technical interview corner (5 questions + answers)
+
+**Q1. Why LangGraph at all — isn't a research loop just a while-loop with
+tool calls?**
+A while-loop works for the happy path, but then every guarantee lives in
+loop-local variables: iteration counts, validation results, revision
+rounds. After the run they're gone, and during it they're untestable in
+isolation. LangGraph's typed state makes the entire run *data* — my loop
+tests assert on `iterations`, `revises`, `trace`, and the validation report
+pulled from final state, and the same structure is what M9 will checkpoint.
+I also deliberately did NOT use the prebuilt `create_react_agent`: the
+whole point of this project is the deterministic validate → revise →
+finalize gates *around* the loop, and a prebuilt agent buries exactly the
+internals I need to route through my own gates. Explicit nodes, pure
+routing functions, typed state — every step inspectable. It's the same
+instinct as keeping the arithmetic in M2's engine: the interesting logic
+stays in code you own.
+
+**Q2. How do you actually know a citation or number in the answer is
+real — especially when the model renders citations in whatever format it
+likes?**
+Two deterministic gates, and neither one trusts the model's formatting.
+Citations: I regex-extract accession patterns from the answer *text* — the
+live run cited `【3†chunk_id:0001045810-26-000075:29】`, a format I never
+parsed at all; the accession inside it either appears in this run's tool
+observations or the sentence is unsupported. Numbers: figures are
+normalized (`$96.2B` ≡ `96,221,000,000`) and must match an observed figure
+within 1% — that tolerance is there because "about $46.7B" *is* the same
+fact as 46,743,000,000, and exact matching would punish honest rounding.
+Years and small plain integers are exempt as non-financial; accessions and
+dates are masked before extraction so a filing number can't masquerade as
+a figure. On failure the run revises once with the report as feedback; if
+it still fails, sentences carrying unsupported claims are stripped and
+every removal is listed under Limitations — the answer's omissions are
+auditable rather than silent. All pure functions, full test matrix.
+
+**Q3. LangGraph ships a `ToolNode`. Why hand-roll your own?**
+Because `ToolNode` gives me message text, and validation needs evidence as
+*data*. If I used it, the observation ledger would have to be re-derived by
+re-parsing `ToolMessage` contents later — a second, lossy translation of
+the one thing the whole verification story rests on. My node executes each
+tool call and records `{tool, args, full text, chunk_ids}` at the exact
+moment the evidence enters the system, so the allowlists validation checks
+against are literally what the tools returned. It's ~30 lines, fully
+inspectable, and the happy-path test pins the structural property
+(`chunk_ids == ["0001045810-26-000075:3"]`). When the thing your
+correctness depends on is cheap to capture at the source, capturing it at
+the source beats reconstructing it later — even if the framework offers a
+default.
+
+**Q4. Your first live run died on a free-tier 429. You had documented
+"no in-provider retries" as an M5 decision — changing it mid-project
+smells like policy drift.**
+The M5 entry said, verbatim, "revisited in hardening" — what changed was
+evidence, not conviction: a live agent loop on an 8000-TPM tier is precisely
+the hardening trigger the note anticipated. The failure chain taught more
+than the fix: a 429 that says "try again in 13.8s" was being answered by
+spending flaky Gemini quota instead of waiting seconds, and when Gemini
+also failed, langchain re-raised the *first* raw error with the fallback's
+cause invisible (`fallbacks.py` logs nothing — I read the installed source
+to confirm). So the amendment is bounded policy, not SDK magic: one wait
+honoring the provider's own Retry-After hint (parsed, capped at 60 s — 30 s
+was tried live and demonstrably didn't clear the window), one retry, then
+failover; non-rate errors still fail over immediately because waiting can't
+fix auth. Plus visibility: our wrapper logs every branch failure, and the
+graph boundary classifies into our taxonomy so the CLI exits 2 with a
+readable cause instead of a traceback. All of it unit-tested — the policy
+change came *with* its tests, which is what separates a revision from
+drift.
+
+**Q5. What happens when a model won't stop calling tools?**
+Three nested bounds, all in routing code, none in the prompt. At
+`agent_max_iterations` (6) the graph injects a force-stop message demanding
+an answer with no further tools. One defensive extra LLM call follows — if
+the model *still* emits tool calls, the router sends it straight to
+validation regardless. Validation then fails an empty or ungrounded draft,
+`agent_max_revises` (1) caps the feedback loop, and `finalize` assembles an
+honest "insufficient evidence" answer with limitations instead of looping.
+The cap test scripts a model that ONLY ever returns tool calls and asserts
+the graph terminates at exactly 8 iterations with limitations recorded —
+and if the loop had wanted a 9th call, the scripted manager would have
+raised an AssertionError inside the graph, failing the test. Bounded by
+construction, and the bound is asserted, not promised.

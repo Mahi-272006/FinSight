@@ -72,6 +72,10 @@ class Settings(BaseSettings):
     # alternative; an empty resulting chain raises LLMConfigurationError.
     llm_provider_chain: str = "groq,gemini"
     llm_timeout_seconds: float = 30.0
+    # M6 hardening: one wait on a rate-limit error (Retry-After hint wins
+    # when the message carries one, capped at 60s), one retry, then failover.
+    # Sized to the observed Groq free-tier 429 ("try again in ~14s").
+    llm_rate_limit_wait_seconds: float = 12.0
     # 2048, not 1024: reasoning models (gpt-oss) spend completion budget on
     # their reasoning channel too -- at 1024 the live demo answer was cut
     # mid-citation. Still bounded; still free-tier friendly.
@@ -82,6 +86,15 @@ class Settings(BaseSettings):
     # size so an oversized context cannot trigger provider 400s -> failover
     # storms, and defines which (lowest-ranked) chunks get truncated first.
     prompt_context_chars: int = 16_000
+
+    # --- Research agent (M6) ---
+    # Hard caps: the LLM never decides when the loop ends. An iteration is
+    # one research (LLM) call; at the cap a force-stop message demands a
+    # final answer, and one defensive extra call is tolerated before the
+    # graph validates whatever exists.
+    agent_max_iterations: int = 6
+    # Validation-driven revision rounds before finalizing with limitations.
+    agent_max_revises: int = 1
 
     # --- Database (wired in M2) ---
     database_url: str = ""

@@ -31,6 +31,7 @@ class-name heuristics rather than isinstance chains across four libraries
 its exceptions, names + status codes are stable.
 """
 
+import re
 import time
 from dataclasses import dataclass
 from typing import Any, Protocol, Sequence
@@ -182,6 +183,24 @@ def _classify(exc: Exception, provider: str) -> LLMProviderError:
     return LLMProviderError(f"{provider} call failed: {text}", provider=provider, status_code=status)
 
 
+_RETRY_AFTER_RE = re.compile(r"try again in (\d+(?:\.\d+)?)s", re.IGNORECASE)
+
+
+def parse_retry_after(message: str) -> float | None:
+    """Seconds a provider asks us to wait, when it says so (e.g. Groq's
+    "Please try again in 13.8075s" on a 429).
+
+    Bounded to [1, 60]: a provider hint is a courtesy, not a schedule -- a
+    free tier that asks for minutes gets a one-minute cap (enough to clear
+    a per-minute token window, which a capped-30s wait demonstrably failed
+    to do live), and the chain still fails over after one wait.
+    """
+    match = _RETRY_AFTER_RE.search(message or "")
+    if not match:
+        return None
+    return max(1.0, min(float(match.group(1)), 60.0))
+
+
 def _content_text(message: BaseMessage) -> str:
     """AIMessage.content is `str` for classic chat models but a list of
     content blocks for newer ones; normalize without losing text blocks."""
@@ -242,6 +261,10 @@ class GroqProvider:
             input_tokens=inputs, output_tokens=outputs, latency_ms=latency_ms,
         )
 
+    def bind_tools(self, tools):
+        """Tools bound on the underlying LangChain runnable (M6 agent)."""
+        return self._model.bind_tools(tools)
+
     def close(self) -> None:
         # langchain-groq owns an underlying groq.Client with an httpx client;
         # close best-effort, attributes differ across SDK versions.
@@ -287,6 +310,10 @@ class GeminiProvider:
             text=text, provider=self.name, model=self.model_name,
             input_tokens=inputs, output_tokens=outputs, latency_ms=latency_ms,
         )
+
+    def bind_tools(self, tools):
+        """Tools bound on the underlying LangChain runnable (M6 agent)."""
+        return self._model.bind_tools(tools)
 
     def close(self) -> None:
         client = getattr(self._model, "client", None)

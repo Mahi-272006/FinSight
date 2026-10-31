@@ -219,34 +219,63 @@ Gemini/Ollama directly. Providers sit behind a small `LLMProvider` protocol;
 
 ### 2.7 LangGraph Research Agent (`app/graph/`)
 
-**Input:** a natural-language research question (+ optional thesis context).
-**Output:** an evidence-backed answer, tool trace, citations, saved report.
-
-A single well-designed agent (not a multi-agent swarm — extra agents add
-complexity, not capability, at this scale) with a typed state object and a
-conditional tool-calling loop:
+**Input:** a research question + ticker (CLI; the API surface arrives in M9).
+**Output:** `ResearchResult` — final answer, validated citations, tool trace,
+validation report, limitations, loop counters. Built as-built in M6:
 
 ```
-START → initialize → parse request → resolve company → plan
-     → research agent ⇄ tool execution (loop, max N iterations)
-     → evidence validation → (revise plan | continue)
-     → analyze findings → evaluate thesis (if applicable)
-     → generate report → save → END
+START → resolve (deterministic: ticker → company row; unknown → END)
+      → research (one LLM call through the tool-bound chain)
+      ⇄ execute_tools (hand-rolled; captures STRUCTURED observations)
+           [cap: agent_max_iterations → force-stop message → one last call]
+      → validate (deterministic) ──pass──→ finalize → END
+                └──fail (≤ agent_max_revises)──→ revise → research
 ```
 
-- **Typed state** (`ResearchState`, a Pydantic/TypedDict schema) carries the
-  question, resolved company, plan, message history, tool outputs, evidence,
-  citations, and final answer. Because state is explicit, every step is
+- **Typed state** (`ResearchState`, TypedDict + reducers): `messages`
+  (`add_messages`), `tool_observations` / `trace` / `limitations`
+  (`operator.add`), plus counters. Because state is explicit, every step is
   inspectable and debuggable — this is the main reason LangGraph over a bare
-  chat loop.
-- **Tool-calling loop with a cap.** The agent may call tools repeatedly, but a
-  hard iteration limit (plus a repeat-detection check) prevents infinite loops.
-- **Evidence validation** is a *deterministic node*, not an LLM judgment: it
-  checks that every cited chunk ID exists in the retrieved set and that every
-  number in the answer appears in a tool output. Unsupported claims are
-  stripped and reported as limitations.
-- **Checkpointing:** graph state can be persisted so long-running research can
-  resume and be audited.
+  chat loop. The `tool_observations` ledger is the run's single source of
+  truth for evidence: citation/number allowlists are derived from it at
+  validation time, never stored twice.
+- **Three retrieval tools, never computing tools** (factory closures over
+  injected deps): `search_filing_sections` (M4 vector search, chunk IDs +
+  provenance), `get_financial_facts` (M2 engine rows — VERIFIED FACT with
+  form/accession, CALCULATED METRIC with formula; this is how the agent gets
+  numbers without computing them), `get_investigation_signals` (M3 rows,
+  disclaimer-first: signals are prompts, not verdicts).
+- **Hand-rolled `execute_tools` node** (not `prebuilt.ToolNode`): every tool
+  call is recorded structurally — full text + chunk IDs — where it is
+  produced, because the validation node needs evidence as *data*, not as the
+  LLM's rendering of message text.
+- **Loop caps are code, not prompt**: `agent_max_iterations` (default 6)
+  routes to a force-stop message at the cap, then one defensive call before
+  validation regardless; `agent_max_revises` (default 1) bounds the
+  validation→revise→research feedback path. Routing functions are pure.
+- **Evidence validation** is a *deterministic node* (`app/graph/evidence.py`,
+  pure functions): every accession cited must appear in THIS RUN's tool
+  observations; every financial figure must match an observed figure within
+  1% tolerance (`$96.2B` ≡ `96,221,000,000`); years and small plain integers
+  are exempt as non-financial; accessions/dates are masked before number
+  extraction so `0001045810-26-000075` is never read as a number. On failure
+  the run revises once with the report as feedback; when revisions run out,
+  `finalize` strips unsupported sentences and lists every removal under
+  Limitations — omissions are auditable, never silent.
+- **Failover inside the graph**: `LLMManager.bind_tools(tools)` returns a
+  `RunnableWithFallbacks` over tool-capable providers (Groq/Gemini; the
+  hand-rolled Ollama adapter has no tool protocol → skipped at build time).
+  Each branch carries the M6 one-wait-on-429 policy (Retry-After hint,
+  capped 60s, one retry) and classifies errors into the M5 taxonomy at the
+  boundary — because langchain re-raises the FIRST branch's raw error when
+  every branch fails (observed live), so classification there is what lets
+  the CLI exit 2 with a readable cause instead of an SDK traceback.
+- **Injection defense extends to tool results**: filing text now arrives in
+  `ToolMessage`s; the system prompt marks tool-result content as untrusted
+  quotation material (same discipline as M5's `<document>` tags).
+- **Checkpointing:** `InMemorySaver` (one thread per run; resumable/auditable
+  within the process). Durable checkpointing (`langgraph-checkpoint-sqlite`)
+  is intentionally deferred to M9, where the API needs cross-process resume.
 
 ### 2.8 Investment Thesis Monitoring (`app/services/thesis_service.py` + M7)
 

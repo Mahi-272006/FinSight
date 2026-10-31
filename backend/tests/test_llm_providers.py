@@ -28,6 +28,7 @@ from app.services.llm_providers import (
     GroqProvider,
     OllamaProvider,
     _key_usable,
+    parse_retry_after,
 )
 
 
@@ -160,6 +161,40 @@ class TestLangChainAdapters:
             client = BadClient()
 
         GroqProvider(HasClient(), "m").close()  # must swallow, not raise
+
+
+# ---------------------------------------------------------------------------
+# Retry-After parsing (M6: the wait-on-429 policy reads the provider's hint)
+# ---------------------------------------------------------------------------
+
+class TestParseRetryAfter:
+    def test_groq_style_hint_parsed_exactly(self):
+        # The exact wording seen live on Groq's free tier.
+        message = ("Rate limit reached for model. TPM: Limit 8000. "
+                   "Please try again in 13.8075s")
+        assert parse_retry_after(message) == pytest.approx(13.8075)
+
+    def test_case_insensitive(self):
+        assert parse_retry_after("PLEASE TRY AGAIN IN 5S") == pytest.approx(5.0)
+
+    def test_no_hint_returns_none(self):
+        assert parse_retry_after("quota exceeded for the day") is None
+        assert parse_retry_after("") is None
+
+    def test_hint_capped_at_sixty_seconds(self):
+        # A provider asking for minutes gets a one-minute cap -- waiting
+        # cannot fix a broken key, and the chain still fails over after ONE
+        # wait. (30s was tried live and did NOT clear Groq's TPM window.)
+        assert parse_retry_after("try again in 600s") == 60.0
+
+    def test_hint_floored_at_one_second(self):
+        # Sub-second hints are noise; one second is the smallest useful wait.
+        assert parse_retry_after("try again in 0.2s") == 1.0
+
+    def test_non_seconds_format_not_misread(self):
+        # "Retry-After: 60" (header style, no 'in ...s') is deliberately not
+        # parsed: we only trust wording we have observed and tested.
+        assert parse_retry_after("Retry-After: 60") is None
 
 
 # ---------------------------------------------------------------------------
