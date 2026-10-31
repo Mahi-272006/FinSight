@@ -1295,3 +1295,244 @@ the graph terminates at exactly 8 iterations with limitations recorded —
 and if the loop had wanted a 9th call, the scripted manager would have
 raised an AssertionError inside the graph, failing the test. Bounded by
 construction, and the bound is asserted, not promised.
+
+---
+
+## M7 — Investment Thesis Monitoring (two-layer assessment, append-only history)
+
+### What was built
+
+The product's differentiating feature (ARCHITECTURE 2.8, written as-built):
+an investor states a thesis in prose, pins measurable conditions to it
+(`revenue_growth_yoy >= 0.10` for FY2026), and the platform assesses it in
+two strictly separated layers, keeping an append-only history.
+
+- **Schema** (`app/database/models.py` + Alembic migration `7cee87c1bedf`,
+  chained on `d872fcb82e52`): `theses` (status NULL = Unassessed),
+  `thesis_conditions` (immutable after creation), `thesis_assessments`
+  (append-only — no `updated_at`, no mutation path; `status_changed_from`
+  is NULL unless the status actually moved). Applied to live PostgreSQL;
+  verified via `information_schema`/`pg_indexes` (3 tables, 6 indexes).
+- **Verified layer** (`app/services/thesis_service.py`, pure functions):
+  `parse_condition` (regex `metric OP threshold`, `≥/≤/=` normalized),
+  `compare` (5 operators, `==` gets a 1e-9 epsilon for float noise),
+  `select_row` (exact period → pinned-year FY row → latest; a missing row
+  is `incomplete` with a reason listing what *does* exist — never a guess,
+  never a quarter silently standing in for a year),
+  `evaluate_condition` (verdict met/not_met/incomplete with full
+  provenance), `derive_status` (the verdict-count matrix).
+- **Lookup precedence:** FinancialMetric first (CALCULATED, formula +
+  source accessions) → FinancialFact fallback (VERIFIED, accession). If
+  the metric *name* exists but the pinned period doesn't, that is
+  `incomplete` — falling back to a fact row would swap metric semantics
+  (growth → raw dollars) and answer a different question than asked.
+- **Interpretive layer:** `build_thesis_interpretation_messages` in
+  `prompting.py` (M7 policy: numbers verbatim, no arithmetic, signals are
+  context not verdicts, gaps stated plainly) + best-effort
+  `LLMManager.generate()`. LLM failure/degradation → assessment still
+  saves with the deterministic explanation; `explanation_source` records
+  which layer wrote the prose (`llm:provider/model` vs
+  `deterministic:condition-counts`).
+- **Service** (`ThesisService`): `create_thesis` (snapshots each
+  condition's current value into `evidence_json` at creation — including
+  honest absence: `"value": null` when the metric doesn't exist yet),
+  `assess` (two layers, appends one immutable row, updates the thesis's
+  cached status), `get_thesis` (full history), `list_theses`.
+- **CLI** (`scripts/thesis.py`): `create|assess|show|list`, exit 0/1/2
+  (2 only when `--require-interpret` and no LLM is configured — assess
+  otherwise degrades to deterministic prose by design).
+- **Signal neutrality:** M3 signals are fetched, trimmed, and attached to
+  the assessment as `signals_json` context; `derive_status`'s ONLY input
+  is condition verdicts — an anomaly alone can never move a thesis toward
+  Contradicted. Enforced structurally (function signature) and pinned by
+  a test (all conditions met + elevated/high signals → still Supported).
+
+### Key design decisions
+
+- **Statuses in code, not prompts:** {Supported, Weakened, Contradicted,
+  Insufficient evidence} via matrix: any `not_met` → Contradicted if zero
+  met else Weakened; no `not_met` but any `incomplete` → Insufficient
+  evidence; else Supported. The LLM is never asked for a status — it
+  explains one that Python already computed.
+- **Evidence at creation:** each condition snapshots the metric's value,
+  tier, period, formula and accessions when the thesis is written, so
+  later assessments can show drift between "what I saw" and "what is
+  now" instead of silently re-basing the thesis on restated data.
+- **Append-only is structural:** assessments have no `updated_at` and no
+  service method mutates an existing row; `status_changed_from` is NULL
+  unless the status actually moved (fixed after the first live run showed
+  a misleading "changed from Weakened" on a repeat assessment of the same
+  world — rows recorded under the buggy semantics were left untouched,
+  which is the invariant proving itself).
+- **The service owns its transaction:** `create_thesis`/`assess` commit
+  internally, so behavior is identical under production's
+  `get_session()` (double commit is a no-op) and a bare test
+  `sessionmaker` (which would otherwise close without committing).
+- **No arithmetic anywhere:** conditions compare thresholds against values
+  the M2 engine already computed; growth/margin formulas exist only in
+  the engine, only with source accessions.
+- **`_fmt`/`_year_period` single formatters:** one place decides how a
+  number (ratio 4 decimals vs dollar separators) and a period ("FY2026"
+  vs "Q1 FY2026") read — in the CLI, the deterministic explanation, and
+  the model prompt alike, so the same value reads identically everywhere.
+
+### Real-data bugs found & fixed (during M7)
+
+1. **My own verification query was wrong, not the migration.** After
+   `alembic upgrade head` I verified with `table_name LIKE 'thesis%'` and
+   saw only 2 of 3 tables — `theses` doesn't match that pattern (spelling:
+   "theses" ≠ "thesis*"). Re-ran with `LIKE 'thes%'`: all 3 tables + 6
+   indexes present. Worth logging because "the test said it's missing"
+   was, this time, the *test* that was broken.
+2. **"FY FY2026".** Period labels were built as
+   `f"{fiscal_period} FY{fiscal_year}"`, which for annual rows renders
+   "FY FY2026". Collapsed into one `_year_period` helper used by the
+   explanation, the snapshot, the signal context and the CLI.
+3. **Misleading `status_changed_from`.** The first live `show` printed
+   "Weakened (changed from Weakened)" — the column recorded the previous
+   status even when nothing changed. Fixed to NULL unless the status
+   actually moved; the append-only test updated to pin both directions
+   (same world → NULL; real flip → prior status named, change note in the
+   explanation).
+4. **Test fixture vs M3's uniqueness constraint.** The signal-neutrality
+   test inserted two `InvestigationSignal` rows with the same
+   (company, type, period) differing only in severity — SQLite's UNIQUE
+   constraint (deliberate, M3) rejected it. Two distinct signal types
+   instead; the constraint was doing its job.
+5. **Naive local timestamp** in the creation snapshot — the project
+   convention is the timezone-aware `utcnow` from `models.py`; fixed
+   before anything stored a naive datetime.
+
+### Tests performed (all executed, outputs shown in session)
+
+- `python -m pytest tests/test_thesis_service.py -q` → **76 passed**
+  (parse/compare/select/evaluate/derive matrices incl. boundary cases;
+  signal-neutrality structural + end-to-end; creation snapshots incl.
+  honest-null; append-only invariant; transition explanation; LLM
+  present/absent/failing/skipped paths; prompt contract).
+- `python -m pytest -q` (full suite) → **410 passed** (334 at M6 close →
+  410). ~16 s wall.
+- **Schema applied live:** `alembic revision --autogenerate -m "add thesis
+  tables"` detected exactly 3 tables + 3 indexes and zero drift on
+  existing schema; `alembic upgrade head` ran `d872fcb82e52 → 7cee87c1bedf`;
+  verified via `information_schema` + `pg_indexes`.
+- **Live CLI demo (real MSFT data, CIK 789019):** thesis with three
+  FY2026 conditions → creation snapshots
+  (`revenue_growth_yoy` 0.1779, `operating_income_margin` 0.4678,
+  `net_income_margin` 0.4031, each with formula + accession
+  `0001193125-26-323660`). `assess 1` → **Weakened** (2/3 met) with live
+  Groq interpretation (`llm:groq/openai/gpt-oss-20b`) restating all three
+  numbers verbatim. `assess --no-interpret` → deterministic explanation
+  with the same verdicts. `show 1` → 3-row append-only timeline (the
+  row recorded under the pre-fix semantics preserved as written).
+  Second thesis (single `net_income_margin>=0.45` condition) →
+  **Contradicted** (0/1 met) from the same real data.
+- Cold-start observation: the first `thesis.py create` invocation took
+  >60 s (timeout) on Windows — first-run `.pyc` compilation + langchain
+  import; the immediately following run took ~3 s. Not a defect, but
+  noted so a demo always does a warm-up import first.
+
+### Current limitations / next steps
+
+- **No scheduled reassessment:** assessments run on demand (CLI); M9's
+  API + a scheduler (or M11 demo script) close that loop.
+- **Condition periods are thesis-wide:** `--fiscal-year`/`--fiscal-period`
+  pin ALL conditions of one thesis to the same period. Mixed-period
+  theses ("FY2026 growth AND FY2027 margin") need per-condition period
+  syntax — a parser extension, deliberately deferred.
+- **No natural-language condition drafting** (LLM proposes, human
+  confirms): structured-only creation keeps M7 deterministic; the
+  drafting layer can be added on top without touching evaluation.
+- **`evidence_json` drift is captured but not surfaced:** assessments
+  don't yet compare creation snapshot vs assessed value (M10 can show
+  "the metric moved from X to Y since you wrote this").
+- **`InMemorySaver`-like ephemerality for theses is NOT a thing** — rows
+  are in PostgreSQL from day one; but multi-user ownership/access control
+  is M9+ scope.
+- **M0 placeholders resolved:** `monitoring_workflow.py` (M7's slot) is
+  filled by `thesis_service.py` + `scripts/thesis.py` — the "monitoring
+  workflow" is a service + CLI, not a langgraph graph (no loop to
+  orchestrate; assessment is one deterministic pass + one optional LLM
+  call). The file is now removed as an empty placeholder; `edges.py` /
+  `workflow.py` remain empty and are candidates for removal at M8 if M9
+  doesn't claim them.
+
+### Next milestone
+
+**M8 — Golden dataset + evaluation framework:** a hand-built golden set
+over real ingested data (questions with known answers across all four
+evidence tiers), an offline evaluation harness that scores RAG answers
+(citation precision/recall, number fidelity, refusal honesty), and the
+first measured regression numbers — the difference between "the tests
+pass" and "the system is good".
+
+---
+
+### M7 — Technical interview corner (5 questions + answers)
+
+**Q1. The two-layer assessment is the headline. How do you stop the LLM
+from ever influencing the status?**
+Structurally, not by prompt. `derive_status(evaluations)` takes exactly
+one parameter — the condition verdicts — and there is a test that asserts
+the signature has exactly one parameter, so adding a `signals=` or
+`llm_says=` argument later fails the suite and forces a conversation. The
+LLM's input is the finished verdict table; its output is stored in
+`explanation` with `explanation_source` saying which layer wrote it; the
+status column is written from Python's return value in the line above.
+When the LLM is down, the assessment still saves — that degraded path
+exists precisely because the verified layer never depended on it. The
+four statuses are computed by a verdict-count matrix that lives in one
+pure function with a full test matrix, so "what Supported means" is
+reviewable in ten lines of code, not scattered across prompts.
+
+**Q2. Why snapshot each condition's value at thesis CREATION?**
+Because a thesis is a claim made at a point in time, and financial data
+mutates underneath it — SEC restatements are real (M2 found them in
+MSFT's own history). If assessment only ever read "current" values, a
+restatement would silently re-base the investor's original thesis and the
+history would show a status change with no visible cause. The creation
+snapshot in `evidence_json` (value, tier, formula, accessions,
+captured_at) makes drift *inspectable*: "the metric said 0.1779 when you
+wrote this; it says 0.1650 now." It's the same reasoning as M2 storing
+`value_original` beside restated facts — provenance at write time is
+cheap, reconstruction later is impossible.
+
+**Q3. Your lookup prefers CALCULATED metrics over VERIFIED facts, but a
+missing period doesn't fall through to the fact table. Isn't that less
+complete?**
+It's less *convenient* and more *correct*. If `revenue_growth_yoy` has no
+FY2025 row but `revenue` does, evaluating the condition against raw
+revenue would answer a different question than the one asked — the
+threshold 0.10 means "10% growth", not "10 dollars". So the row is
+missing → verdict `incomplete` → status "Insufficient evidence", with a
+reason that names the periods that DO exist. "I don't know, and here's
+what I would need" is the honest answer, and it's the same discipline as
+M6 stripping unsupported sentences rather than letting them stand. The
+incompleteness surfaces to the investor; they can re-pin the condition.
+
+**Q4. `thesis_assessments` has no updated_at and no update path. Isn't
+that artificial rigidity?**
+It's rigidity in service of the audit trail, and it's already paid for
+itself. The first live run recorded a misleading "(changed from
+Weakened)" row — after fixing the code, the correct behavior appeared on
+row 3 while rows 1–2 remained exactly as written. An editable history
+would have invited "just fix the bad rows," destroying the evidence that
+the bug ever happened — which is the same evidence that let me verify the
+fix. If the schema ever genuinely needs to change, that's an Alembic
+migration plus a documented backfill decision, not a quiet UPDATE. The
+cost of immutability is paid once, in a migration; the cost of mutable
+history is paid every time someone trusts it.
+
+**Q5. Anomaly signals exist in the DB. Why not let them count toward the
+status — "supported but with red flags" sounds useful?**
+Because the moment a signal can move the verdict, the verdict means
+"the model was worried" instead of "the conditions were checked," and the
+two claims have completely different evidentiary weight. M3 signals are
+derived from statistical divergence — they are prompts for a human to
+look, exactly as the project rule says: anomalies are investigation
+signals, never fraud verdicts. So signals ride along in `signals_json`,
+the deterministic explanation names them as context, the prompt tells the
+LLM they are never verdicts, and the status stays what the numbers say.
+The end-to-end test pins it: every condition met plus elevated AND
+high-severity signals → status still Supported, signals still attached.
+Useful and honest, without conflating "worth reviewing" with "contradicted".

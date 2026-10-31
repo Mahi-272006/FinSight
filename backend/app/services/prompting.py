@@ -134,3 +134,100 @@ def build_grounded_messages(
         )
 
     return [SystemMessage(content=SYSTEM_POLICY), HumanMessage(content=human)], used
+
+
+# ---------------------------------------------------------------------------
+# M7: thesis interpretation (the interpretive layer over verified verdicts)
+# ---------------------------------------------------------------------------
+
+THESIS_INTERPRETATION_POLICY = """You are FinSight's thesis-interpretation layer. You receive an \
+ALREADY-COMPUTED assessment: measurable conditions of an investment thesis, each with its verdict \
+(met / not_met / incomplete), the evaluated value, and the deterministic status derived from \
+those verdicts. Your job is to explain, in plain prose, what the verified result means for the \
+thesis.
+
+Rules, in priority order:
+
+1. NO ARITHMETIC. Every number you use must appear verbatim in the assessment below. Never \
+compute, derive, average, or extrapolate numbers. The verdicts and the status are given -- \
+restate them, do not re-derive them.
+
+2. EVIDENCE TIERS. The condition verdicts, values, and status are CALCULATED METRIC / VERIFIED \
+FACT (computed by deterministic Python with provenance). Your prose is LLM INTERPRETATION \
+always, and must be framed as such: it is your reading of the verified result, not a new fact. \
+Do not add facts that are not in the assessment.
+
+3. ANOMALIES ARE SIGNALS, NOT VERDICTS. If investigation signals are listed, they are context \
+for the analyst's review -- never evidence of misstatement or fraud, and never a reason a \
+condition counts as met or not met. Say "worth investigating", not "the company misled \
+investors".
+
+4. HONESTY. If conditions are incomplete, say plainly which data is missing rather than \
+speculating about it. If the status is Contradicted, state which conditions failed and their \
+evaluated values.
+
+Format: 3-6 sentences of plain prose, no headings, no tables."""
+
+
+def _format_eval_line(e) -> str:
+    """One condition's verdict as a single model-readable line.
+
+    Value formatting mirrors thesis_service._fmt (small ratios keep 4
+    decimals, large amounts get separators) so the model sees exactly the
+    number the verified layer computed -- formatted once, here.
+    """
+    if e.value is None:
+        value_text = "n/a"
+    elif abs(e.value) < 10:
+        value_text = f"{e.value:.4f}".rstrip("0").rstrip(".")
+    else:
+        value_text = f"{e.value:,.0f}"
+    parts = [
+        f"- {e.description}: {e.verdict.upper()}",
+        f"value: {value_text}",
+        f"tier: {e.tier or 'n/a'}",
+    ]
+    if e.formula:
+        parts.append(f"formula: {e.formula}")
+    if e.accessions:
+        parts.append(f"source: {', '.join(e.accessions)}")
+    return f"{parts[0]} (" + ", ".join(parts[1:]) + ")"
+
+
+def build_thesis_interpretation_messages(
+    *,
+    ticker: str,
+    statement: str,
+    horizon: str,
+    status: str,
+    evaluations: Sequence,
+    signals_context: Sequence[dict] = (),
+) -> list[SystemMessage | HumanMessage]:
+    """Policy + the pre-computed verdict table -> interpretation messages.
+
+    The evaluations arrive as ConditionEvaluation dataclasses (M7 service);
+    numbers are formatted here ONCE for the model, exactly as the verified
+    layer computed them -- the model never sees raw math to re-interpret.
+    """
+    lines = [_format_eval_line(e) for e in evaluations]
+    signals_lines = [
+        f"- {s.get('signal_type')} ({s.get('severity')}, {s.get('period')}): {s.get('headline')}"
+        for s in signals_context
+    ]
+
+    human = (
+        f"Thesis ({ticker}, horizon {horizon}): {statement!r}\n\n"
+        f"Verified status (deterministic, computed by Python): {status}\n\n"
+        "Condition verdicts (verified layer):\n" + "\n".join(lines)
+    )
+    if signals_lines:
+        human += (
+            "\n\nInvestigation signals (context only, never verdicts):\n"
+            + "\n".join(signals_lines)
+        )
+    human += "\n\nExplain what this verified result means for the thesis."
+
+    return [
+        SystemMessage(content=THESIS_INTERPRETATION_POLICY),
+        HumanMessage(content=human),
+    ]

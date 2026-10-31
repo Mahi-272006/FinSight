@@ -202,3 +202,141 @@ class InvestigationSignal(Base):
     source_accessions_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
 
     detected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+# ---------------------------------------------------------------------------
+# M7: Investment thesis monitoring
+#
+# Three tables with three different write policies, chosen per table:
+# - theses: mutable pointer row (status = latest assessment, NULL = never
+#   assessed); history lives in the assessments table, never here.
+# - thesis_conditions: immutable after creation (the commitments of a
+#   thesis don't change; if the investor changes their mind they write a
+#   new thesis).
+# - thesis_assessments: append-only; no updated_at column exists, so an
+#   "edit" would require schema change + service method -- deliberately
+#   absent. History is a fact about the past.
+# ---------------------------------------------------------------------------
+
+
+class Thesis(Base):
+    """An investment thesis for one company (M7).
+
+    A thesis is a prose statement ("NVDA sustains double-digit growth
+    despite export controls") PLUS measurable conditions that commit the
+    statement to numbers. Assessment evaluates the conditions in pure
+    Python (VERIFIED layer); an optional LLM summarizes what the verdicts
+    mean (interpretive layer). Keeping the two apart is the same
+    fact/signal/interpretation split as M2/M3, applied to opinions.
+
+    status is NULL until the first assessment ("Unassessed"). After that
+    it caches the latest verdict; the full timeline stays in
+    thesis_assessments.
+    """
+
+    __tablename__ = "theses"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+
+    cik: Mapped[int] = mapped_column(ForeignKey("companies.cik"), nullable=False, index=True)
+    ticker: Mapped[str] = mapped_column(String(10), nullable=False)  # denormalized for display
+
+    statement: Mapped[str] = mapped_column(Text, nullable=False)
+    horizon: Mapped[str] = mapped_column(String(64), nullable=False)  # e.g. "FY2026", "12 months"
+
+    status: Mapped[str | None] = mapped_column(String(32), nullable=True)  # NULL = Unassessed
+    status_explanation: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+    conditions: Mapped[list["ThesisCondition"]] = relationship(
+        back_populates="thesis", cascade="all, delete-orphan", lazy="selectin"
+    )
+
+
+class ThesisCondition(Base):
+    """One measurable commitment of a thesis (M7).
+
+    A condition is (metric, comparator, threshold) over one period of the
+    M2 metric/fact tables -- e.g. `revenue_growth_yoy >= 0.10` for FY2026.
+    fiscal_year/fiscal_period are nullable meaning "latest available
+    period", so "growth stays above 10%" doesn't hardcode a filing that
+    doesn't exist yet.
+
+    evidence_json snapshots the metric's value AT CREATION (value, tier
+    CALCULATED/VERIFIED, formula, accessions): the thesis is judged
+    against the world as the investor saw it, and any later restatement
+    shows up as drift between snapshot and assessment instead of
+    silently rewriting history.
+
+    Immutable after creation -- no service updates this row.
+    """
+
+    __tablename__ = "thesis_conditions"
+    __table_args__ = (Index("ix_conditions_thesis", "thesis_id"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+
+    thesis_id: Mapped[int] = mapped_column(
+        ForeignKey("theses.id", ondelete="CASCADE"), nullable=False
+    )
+
+    description: Mapped[str] = mapped_column(String(512), nullable=False)  # human wording
+    metric: Mapped[str] = mapped_column(String(64), nullable=False)  # M2 metric/fact name
+    comparator: Mapped[str] = mapped_column(String(4), nullable=False)  # >= <= > < ==
+    threshold: Mapped[float] = mapped_column(Float, nullable=False)
+
+    fiscal_year: Mapped[int | None] = mapped_column(Integer, nullable=True)  # None = latest
+    fiscal_period: Mapped[str | None] = mapped_column(String(4), nullable=True)  # None = latest
+
+    evidence_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    thesis: Mapped["Thesis"] = relationship(back_populates="conditions")
+
+
+class ThesisAssessment(Base):
+    """One point-in-time evaluation of a thesis (M7, APPEND-ONLY).
+
+    Layers stored side by side, each labelled:
+    - summary_json: VERIFIED layer -- per-condition verdict (met /
+      not_met / incomplete) with the evaluated number, tier and
+      provenance (formula or accession) as computed by Python.
+    - explanation + explanation_source: interpretive prose with a record
+      of WHICH layer produced it (`llm:groq/...` vs
+      `deterministic:condition-counts`) -- provenance discipline applied
+      to words, not just numbers.
+    - signals_json: M3 investigation signals shown as CONTEXT ONLY.
+      They never enter status derivation: an anomaly alone can never
+      move a thesis toward Contradicted (the rule is enforced in
+      code and pinned by test, not by prompt).
+
+    No updated_at column: append-only is structural, and each row keeps
+    status_changed_from so transitions are readable directly from the
+    timeline.
+    """
+
+    __tablename__ = "thesis_assessments"
+    __table_args__ = (Index("ix_assessments_thesis", "thesis_id", "assessed_at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+
+    thesis_id: Mapped[int] = mapped_column(
+        ForeignKey("theses.id", ondelete="CASCADE"), nullable=False
+    )
+
+    status: Mapped[str] = mapped_column(String(32), nullable=False)  # Supported/Weakened/...
+    status_changed_from: Mapped[str | None] = mapped_column(String(32), nullable=True)
+
+    summary_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    explanation: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    explanation_source: Mapped[str] = mapped_column(String(96), nullable=False, default="")
+
+    evidence_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    signals_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+
+    assessed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

@@ -283,22 +283,43 @@ The differentiating feature. A thesis is a structured object:
 
 ```
 thesis statement + company + time horizon
-  → measurable conditions (e.g. "FY revenue growth ≥ 10%")
+  → measurable conditions (e.g. "revenue_growth_yoy >= 0.10" for FY2026)
   → relevant metrics + supporting evidence at creation time
   → assessment history (append-only)
 ```
 
+**Tables** (migration `7cee87c1bedf`): `theses` (status is NULL until first
+assessment), `thesis_conditions` (immutable after creation; each snapshots
+the metric's value at creation into `evidence_json` so later drift is
+visible, not silent), `thesis_assessments` (append-only: no `updated_at`,
+no mutation path; `status_changed_from` is NULL unless the status actually
+moved).
+
 Assessment separates two layers:
 
-1. **Verified layer (Python):** evaluate measurable conditions against actual
-   data — true/false/incomplete, with the numbers shown.
-2. **Interpretive layer (LLM):** summarize what the verified changes mean for
-   the thesis *in words*, constrained to the verified facts.
+1. **Verified layer (Python, pure functions):** `parse_condition` turns
+   `metric OP threshold` into a spec; `evaluate_condition` compares a
+   looked-up value against the threshold; `derive_status` maps verdicts to
+   a status. Lookup precedence: FinancialMetric first (CALCULATED, with
+   formula + accessions) → FinancialFact fallback (VERIFIED). Period
+   selection: exact match, else the annual (FY) row of the pinned year,
+   else latest available — a missing row is `incomplete`, never a guess
+   and never a silent substitution of a quarter for a year.
+2. **Interpretive layer (LLM, best-effort):** `build_thesis_interpretation_messages`
+   hands the model the pre-computed verdict table; it must restate numbers
+   verbatim, never compute. On LLM failure the assessment still saves with
+   the deterministic explanation; `explanation_source` records which layer
+   wrote it (`llm:provider/model` vs `deterministic:condition-counts`).
 
-Status ∈ {Supported, Weakened, Contradicted, Insufficient evidence}. Key rule:
-an ML anomaly **alone** never flips a thesis to Contradicted — anomalies are
-signals that trigger *investigation*, not verdicts. Every status change stores
-an explanation and the evidence that caused it.
+Status ∈ {Supported, Weakened, Contradicted, Insufficient evidence}, by
+matrix: any not_met → Contradicted (if zero met) else Weakened; no not_met
+but any incomplete → Insufficient evidence; else Supported. Key rule: an
+ML anomaly **alone** never flips a thesis to Contradicted — enforced
+structurally (`derive_status`'s only input is condition verdicts; signals
+ride along as `signals_json` context) and pinned by a test. Every status
+change stores an explanation and the evidence that caused it.
+
+CLI: `scripts/thesis.py create|assess|show|list`.
 
 ---
 
