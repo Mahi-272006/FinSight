@@ -432,6 +432,24 @@ def calculate_all_metrics(
     for (fy, fp, _pt) in instant_slots:
         results.append(current_ratio(index, cik, fy, fp, PeriodType.INSTANT))
 
+        # Accounts-receivable growth (instant metric, YoY). Added in M3 to
+        # feed the receivables-vs-revenue anomaly rule WITH full provenance --
+        # computing it ad-hoc in the detector would bypass the audit trail.
+        # Only emitted at fiscal-year-end slots (fp == FY): quarter-end AR is
+        # seasonal and a YoY comparison of two quarter-ends is noisy.
+        if fp == "FY":
+            results.append(
+                growth_rate(
+                    index,
+                    Metric.ACCOUNTS_RECEIVABLE,
+                    cik,
+                    fy,
+                    fp,
+                    PeriodType.INSTANT,
+                    fy - 1,
+                )
+            )
+
     return results
 
 

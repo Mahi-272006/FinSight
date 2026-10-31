@@ -160,3 +160,45 @@ class FinancialMetric(Base):
     source_accessions_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
 
     calculated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class InvestigationSignal(Base):
+    """One anomaly-detection finding for one company-period (SIGNAL layer).
+
+    Deliberately named 'InvestigationSignal', not 'Anomaly' or 'Fraud': the
+    project rule is that anomalies are prompts for ANALYST REVIEW, never
+    verdicts. The LLM layer (M5/M6) will interpret these; it never creates
+    them. Rows are upserted (unique on company+type+period) so re-running
+    detection refreshes rather than duplicates.
+
+    Evidence/provenance columns mirror FinancialMetric: the triggering input
+    values, the threshold, and the formula are stored so any signal shown in
+    the UI can be expanded to its exact arithmetic.
+    """
+
+    __tablename__ = "investigation_signals"
+    __table_args__ = (
+        UniqueConstraint(
+            "cik", "signal_type", "fiscal_year", "fiscal_period",
+            name="uq_signal_period",
+        ),
+        Index("ix_signals_company", "cik", "signal_type"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+
+    cik: Mapped[int] = mapped_column(ForeignKey("companies.cik"), nullable=False)
+    ticker: Mapped[str] = mapped_column(String(10), nullable=False)
+    signal_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    severity: Mapped[str] = mapped_column(String(16), nullable=False)  # elevated / high
+
+    fiscal_year: Mapped[int] = mapped_column(Integer, nullable=False)
+    fiscal_period: Mapped[str] = mapped_column(String(4), nullable=False)
+    period_type: Mapped[str] = mapped_column(String(16), nullable=False)
+
+    headline: Mapped[str] = mapped_column(String(512), nullable=False)
+    explanation: Mapped[str] = mapped_column(Text, nullable=False)
+    evidence_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    source_accessions_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+
+    detected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

@@ -17,10 +17,16 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
-from app.database.models import Base, Company, FinancialFact, FinancialMetric
-from app.database.repositories import CompanyRepository, FactRepository, MetricRepository
+from app.database.models import Base, Company, FinancialFact, FinancialMetric, InvestigationSignal
+from app.database.repositories import (
+    CompanyRepository,
+    FactRepository,
+    MetricRepository,
+    SignalRepository,
+)
 from app.ingestion.data_cleaner import NormalizedFact
 from app.schemas.company import FiscalPeriod, Metric, PeriodType
+from app.services.anomaly_detection import InvestigationSignal as SignalDC
 from app.services.financial_engine import CalculatedMetric
 
 
@@ -173,3 +179,86 @@ class TestMetricRepository:
         assert row.formula == "operating_income / revenue"
         assert "operating_income" in row.inputs_json
         assert "0000950170-25-100235" in row.source_accessions_json
+
+
+    def test_none_valued_metrics_are_never_stored(self, session):
+        """The engine emits value=None when inputs are missing; the repository
+        must DROP those, not persist rows every consumer would have to filter.
+        (460 such rows were found live after the M3 engine extension -- this
+        test prevents the regression.)"""
+        repo = MetricRepository(session)
+        repo.upsert_metrics(789019, [
+            CalculatedMetric(
+                cik=789019, metric="debt_to_assets", value=None, unit="ratio",
+                fiscal_year=2007, fiscal_period="FY", period_type="annual",
+                formula="total_liabilities / total_assets",
+                inputs={}, source_accessions=[],
+            ),
+            CalculatedMetric(
+                cik=789019, metric="operating_income_margin", value=0.45, unit="ratio",
+                fiscal_year=2007, fiscal_period="FY", period_type="annual",
+                formula="operating_income / revenue",
+                inputs={}, source_accessions=[],
+            ),
+        ])
+        rows = repo.get_metrics(789019)
+        assert [r.metric for r in rows] == ["operating_income_margin"]
+        assert rows[0].value == 0.45
+
+
+class TestSignalRepository:
+    def _make_signal(
+        self,
+        signal_type: str = "earnings_cashflow_divergence",
+        severity: str = "elevated",
+        fiscal_year: int = 2025,
+    ) -> SignalDC:
+        return SignalDC(
+            cik=789019, ticker="MSFT", signal_type=signal_type, severity=severity,
+            fiscal_year=fiscal_year, fiscal_period="FY", period_type="annual",
+            headline="test headline", explanation="test explanation",
+            evidence={"divergence": 0.25, "threshold_elevated": 0.20},
+            source_accessions=["ACC-1"],
+        )
+
+    def test_upsert_inserts_then_updates_no_duplicates(self, session):
+        repo = SignalRepository(session)
+        repo.upsert_signals([self._make_signal(severity="elevated")])
+        # Re-run with escalated severity: same (cik, type, fy, fp) key -> update.
+        repo.upsert_signals([self._make_signal(severity="high")])
+        rows = repo.get_signals(cik=789019)
+        assert len(rows) == 1  # no duplicate
+        assert rows[0].severity == "high"  # latest wins
+
+    def test_replace_company_signals_removes_stale(self, session):
+        """A company that improves must shed its old signals (full refresh)."""
+        repo = SignalRepository(session)
+        repo.upsert_signals([
+            self._make_signal(fiscal_year=2024),
+            self._make_signal(fiscal_year=2025),
+        ])
+        assert len(repo.get_signals(cik=789019)) == 2
+        # Fresh run finds nothing -> replace with empty wipes the company.
+        repo.replace_company_signals(789019, [])
+        assert repo.get_signals(cik=789019) == []
+
+    def test_evidence_json_round_trips(self, session):
+        import json as _json
+
+        repo = SignalRepository(session)
+        repo.upsert_signals([self._make_signal()])
+        row = repo.get_signals(cik=789019)[0]
+        evidence = _json.loads(row.evidence_json)
+        assert evidence["divergence"] == 0.25
+        assert evidence["threshold_elevated"] == 0.20
+        assert _json.loads(row.source_accessions_json) == ["ACC-1"]
+
+    def test_filter_by_signal_type(self, session):
+        repo = SignalRepository(session)
+        repo.upsert_signals([
+            self._make_signal(signal_type="growth_deceleration", fiscal_year=2023),
+            self._make_signal(signal_type="earnings_cashflow_divergence"),
+        ])
+        rows = repo.get_signals(cik=789019, signal_type="growth_deceleration")
+        assert len(rows) == 1
+        assert rows[0].signal_type == "growth_deceleration"

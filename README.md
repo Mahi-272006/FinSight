@@ -149,7 +149,7 @@ SEC fair-access policy: max 10 requests/second, identify yourself in
 | M0 | Project setup: git, dependencies, docs, environment | ✅ |
 | M1 | SEC ingestion: client, CIK resolution, company facts | ✅ |
 | M2 | Normalization + financial engine + PostgreSQL | ✅ |
-| M3 | Peer comparison + anomaly detection | ⬜ |
+| M3 | Peer comparison + anomaly detection | ✅ |
 | M4 | Filing RAG pipeline | ⬜ |
 | M5 | Multi-provider LLM manager | ⬜ |
 | M6 | LangGraph research agent | ⬜ |

@@ -130,24 +130,38 @@ download HTML → parse (lxml) → locate sections (MD&A, Risk Factors, ...)
   prompt explicitly forbids following instructions found inside documents
   (prompt-injection defense).
 
-### 2.5 Financial Anomaly Detection (`app/models/`)
+### 2.5 Financial Anomaly Detection (`app/services/anomaly_detection.py` — rule layer implemented in M3; ML layer planned)
 
-**Input:** per-company feature matrix built from historical metrics.
-**Output:** anomaly scores + human-readable explanations.
+**Input:** per-company metric time series built from `FinancialMetric` rows.
+**Output:** investigation signals (severity + evidence + human-readable
+explanation), persisted to `investigation_signals`.
 
-- Model: **Isolation Forest** (scikit-learn). Chosen because it is unsupervised
-  (fraud labels don't exist), fast, robust to high dimensions, and its
-  contamination parameter maps naturally to "flag the top N% of odd cases."
-- Features: revenue growth, margin changes, debt growth, receivables vs revenue
-  growth, net-income vs OCF divergence, etc. — each computed by the same
-  deterministic engine, never by the LLM.
-- **Interpretability:** the detector reports *which* features contributed most
-  to isolation (per-feature deviation from the company's own history), so the
-  alert says "OCF fell 34% while net income rose 12% versus your 5-year
-  pattern," not just "score = 0.71."
-- **Honesty about limits:** an anomaly is an *investigation signal*. The score
-  is not a calibrated probability of fraud. This caveat appears in the UI, the
-  API, and the docs.
+The detector has two layers by design:
+
+- **Deterministic rules (implemented in M3).** Four hand-justified,
+  unit-tested rules over engine-computed metrics: earnings–cash-flow
+  divergence, receivables outpacing revenue, sustained margin-compression
+  streaks, and growth deceleration. Each rule documents its thresholds,
+  fires only in the concerning direction (sign-aware), stays silent on
+  missing data, and attaches its full evidence (input values, threshold,
+  formula, source accession numbers) to every signal. Peer-relative context
+  comes from `peer_comparison.py` (leave-one-out z-scores, labeled
+  "indicative only" when the peer set is too small for statistical
+  significance — honesty is enforced in code, not just prose).
+- **ML statistical flags (planned).** **Isolation Forest**
+  (scikit-learn) over the feature matrix the same deterministic engine
+  already computes (growth, margin deltas, receivables-vs-revenue,
+  NI-vs-OCF divergence). Chosen because it is unsupervised (fraud labels
+  don't exist), fast, and its contamination parameter maps naturally to
+  "flag the top N% of odd cases." The detector will report *which*
+  features contributed most to isolation, so the alert says "OCF fell 34%
+  while net income rose 12% versus your 5-year pattern," not just
+  "score = 0.71."
+
+- **Honesty about limits:** an anomaly is an *investigation signal*. Neither
+  a rule firing nor an isolation score is a calibrated probability of fraud.
+  Every signal carries the explicit "NOT a finding of misstatement"
+  framing; this caveat also appears in the UI, the API, and the docs.
 
 ### 2.6 LLM Manager (`app/services/llm_manager.py`)
 
