@@ -7,8 +7,9 @@ what was tested, what is still missing, and what comes next.
 
 ## M0 — Project Setup
 
-**Status:** in progress
+**Status:** ✅ COMPLETE
 **Date:** 2026-10-31
+**Commit:** `ee8999d`
 
 ### Starting point (inspection findings)
 
@@ -37,6 +38,10 @@ what was tested, what is still missing, and what comes next.
 | `README.md` (root) | Project overview, design principles, setup instructions, roadmap |
 | `ARCHITECTURE.md` | Beginner-friendly explanation of all components, data flow, and design rationale |
 | `IMPLEMENTATION_LOG.md` | This file |
+| `backend/pytest.ini` | Pytest config: test discovery, `asyncio_mode=auto` for M5/M6 async tests, known-warning filter |
+| `backend/tests/conftest.py` | Shared fixture stub (filled per milestone) |
+| `backend/tests/test_smoke.py` | 3 smoke tests proving pytest + async mode + package imports work |
+| `backend/scripts/verify_environment.py` | 27-check environment verifier (imports, versions, integration smoke checks) |
 
 ### Decisions made
 
@@ -56,22 +61,65 @@ what was tested, what is still missing, and what comes next.
 
 ```powershell
 git init                                              # initialized repo
-psql (PostgreSQL 18.3) — verified service running
-venv\Scripts\pip.exe install torch --index-url https://download.pytorch.org/whl/cpu
-venv\Scripts\pip.exe install -r requirements.txt
+& "C:\Program Files\PostgreSQL\18\bin\psql.exe" -U postgres -c "CREATE DATABASE finsight;"   # by user
+venv\Scripts\pip.exe install torch --index-url https://download.pytorch.org/whl/cpu   # torch 2.14.1+cpu
+venv\Scripts\pip.exe install -r requirements.txt      # 151 packages total
+python scripts/verify_environment.py                  # 27/27 checks passed, exit 0
+python -m pytest -q                                   # 3 passed, exit 0
+git add -A && git commit                              # ee8999d
 ```
 
 ### Tests performed
 
-(pending dependency installation)
+1. **Environment verification** (`scripts/verify_environment.py`): all 24
+   packages import cleanly. Three deeper integration checks passed:
+   - `langchain_core.tools.tool` decorator constructs a working tool
+     (proves LangChain tool-calling wiring, not just the import)
+   - `langgraph.graph` START/END constants resolve
+   - SQLAlchemy engine + connection via in-memory SQLite
+2. **Pytest harness** (`tests/test_smoke.py`): 3 tests passed —
+   sync test, async test (confirms `asyncio_mode=auto`), `import app`.
+
+### Installed versions (key packages)
+
+| Package | Version |
+|---|---|
+| Python | 3.10.11 |
+| torch (CPU) | 2.14.1+cpu |
+| langgraph | 0.6.11 |
+| langchain-core | 0.3.86 |
+| langchain-groq | 0.3.8 |
+| langchain-google-genai | 2.1.12 |
+| fastapi | 0.162.0 |
+| sqlalchemy | 2.0.55 |
+| alembic | 1.20.1 |
+| psycopg | 3.3.6 |
+| chromadb | 1.5.9 |
+| sentence-transformers | 3.4.1 |
+| scikit-learn | 1.7.2 |
+| pandas | 2.3.3 |
+| numpy | 2.2.6 |
+| pytest | 8.4.2 |
+
+### Known risks / warnings observed
+
+- **Google Python 3.10 deprecation:** importing `langchain_google_genai`
+  prints a FutureWarning — Google has stopped updating `google.api_core`
+  for Python 3.10. Works today; affects only the Gemini fallback provider.
+  Action deferred to M5 (when Gemini is actually integrated) — options then:
+  keep 3.10 while it works, or upgrade the venv to 3.11+.
+- `langgraph` emits a `LangChainPendingDeprecationWarning` about checkpoint
+  serde defaults — cosmetic, no functional impact; revisit in M6 when
+  checkpointing is implemented.
 
 ### Current limitations
 
-- No application logic implemented yet; all `app/` files are still empty.
-- `.env` contains placeholder values only — the user must supply real
-  `GROQ_API_KEY` / `GEMINI_API_KEY`, a real SEC contact email, and the
-  PostgreSQL password.
-- PostgreSQL `finsight` database not yet created (user action pending).
+- No application logic implemented yet; all `app/` files are still empty
+  (verified importable, but containing no code).
+- `.env` contains placeholders — user must supply real `GROQ_API_KEY` /
+  `GEMINI_API_KEY`, a real SEC contact email, and the PostgreSQL password.
+  (User has created the `finsight` database.)
+- Frontend remains the untouched Vite scaffold.
 
 ### Next milestone
 
