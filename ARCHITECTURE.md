@@ -53,39 +53,50 @@ This one rule eliminates the largest category of financial AI hallucination.
 the project, you can diff the stored raw JSON against a fresh SEC response and
 prove where the discrepancy came from. Raw data is the audit trail.
 
-### 2.2 Normalization (`app/ingestion/data_cleaner.py` + M2 work)
+### 2.2 Normalization (`app/ingestion/data_cleaner.py` — implemented in M2)
 
-**Input:** raw XBRL facts.
-**Output:** clean `FinancialFact` rows in PostgreSQL.
+**Input:** raw XBRL facts (one company payload).
+**Output:** clean `NormalizedFact` lists → `FinancialFact` rows in PostgreSQL.
 
-Real-world XBRL is messy, and this is where most of the subtle correctness work
-lives:
+Real-world XBRL is messy, and this is where most of the subtle correctness
+work lives. Each problem below was confirmed against **live SEC data**:
 
-- **Concept drift across companies.** Microsoft reports revenue as
-  `RevenueFromContractWithCustomerExcludingAssessedTax`; older filings used
-  `Revenues`; some companies use `SalesRevenueNet`. We map many tags → one
-  canonical metric, per company, with a documented mapping table.
-- **Period confusion.** Every fact has a *form* (`10-K` annual vs `10-Q`
-  quarterly) and a *frame* (start/end date). A 10-Q for Q3 reports
-  **year-to-date** numbers (9 months). To get the *standalone* Q3 quarter we
-  compute `9M_YTD − 6M_YTD`. Doing this wrongly is the classic double-counting
-  bug; we detect YTD facts by comparing period lengths, not by trusting labels.
-- **Amendments and restatements.** The same concept/period can appear in
-  multiple filings (original 10-K, then a 10-K/A amendment). Rule: *latest
-  filed* fact wins, but every version is kept with its accession number so the
-  change history is visible.
-- **Units.** Facts arrive in USD, shares, or per-share units. We normalize to
-  canonical units and reject mismatches loudly.
+- **Concept drift — direction differs per company.** Microsoft reports recent
+  revenue as `RevenueFromContractWithCustomerExcludingAssessedTax` (modern
+  ASC-606 tag) and older revenue as `Revenues`. NVIDIA does the **opposite**:
+  older years under the ASC-606 tag, FY2023–26 under generic `Revenues`.
+  The normalizer therefore tries *all* tags in a documented priority chain
+  and lets the highest-priority tag win **per period**, with later tags
+  filling periods earlier tags lack. (Picking a single tag hid NVIDIA's
+  entire recent history — caught only by verifying against real data.)
+- **Period confusion.** 10-Qs report **year-to-date** figures, not standalone
+  quarters. We classify every fact's period by **date arithmetic** (350–380
+  days → annual, 80–100 → quarterly, otherwise YTD) — never by trusting
+  labels. Standalone quarters are derived as `Q2=H1−Q1`, `Q3=9M−H1`,
+  `Q4=Annual−9M`; if any input is missing, no quarter is emitted.
+- **Fiscal-year labels lie for comparative columns.** A 10-Q's prior-year
+  comparative facts carry the *filing's* `fy` label. Fiscal years are
+  therefore derived from period-end dates plus the company's inferred
+  fiscal-year-end month (the modal end-month of its annual facts), which
+  works for June (MSFT), September (AAPL), and January (NVDA) year-ends.
+- **Amendments and restatements.** Same period in multiple filings: the
+  *latest filed* fact wins; if the value **changed**, both values are kept
+  (`value_original` + `is_restated`) and the change is surfaced, never hidden.
+- **Units.** Facts in unexpected units are rejected loudly, never guessed.
 
-### 2.3 Financial Engine (`app/services/financial_engine.py`)
+### 2.3 Financial Engine (`app/services/financial_engine.py` — implemented in M2)
 
-**Input:** normalized facts for one company (or several, for peers).
+**Input:** normalized facts for one company.
 **Output:** `FinancialMetric` records, each carrying **provenance**.
 
-Every metric record stores: company, period, the *formula name*, the *input
-values*, the unit, the source (accession number), and a calculation timestamp.
-This means any number shown in the UI can be expanded to show exactly how it
-was computed — from raw SEC fact to final ratio.
+Growth rates (YoY, sign-correct for loss recovery), margins, ROA, free cash
+flow, current ratio, debt-to-assets, and an earnings-vs-cash-flow divergence
+signal. Every metric record stores: company, period, the *formula name*, the
+*input values*, the source accession numbers, and a calculation timestamp —
+so any number in the UI can be expanded to its exact arithmetic. Division by
+zero returns `None` with a recorded reason; it never raises and never
+produces inf/nan. **The LLM never computes any of this** — all arithmetic is
+deterministic Python covered by hand-verified golden-value tests.
 
 Metrics implemented (growth, profitability, health):
 revenue/operating-income/net-income/OCF growth · gross/operating/net margins ·

@@ -144,20 +144,20 @@ SEC fair-access policy: max 10 requests/second, identify yourself in
 
 ## Roadmap (milestones)
 
-| # | Milestone |
-|---|---|
-| M0 | Project setup: git, dependencies, docs, environment |
-| M1 | SEC ingestion: client, CIK resolution, company facts |
-| M2 | Normalization + financial engine + PostgreSQL |
-| M3 | Peer comparison + anomaly detection |
-| M4 | Filing RAG pipeline |
-| M5 | Multi-provider LLM manager |
-| M6 | LangGraph research agent |
-| M7 | Investment thesis monitoring |
-| M8 | Golden dataset + evaluation framework |
-| M9 | FastAPI endpoints |
-| M10 | React dashboard |
-| M11 | Integration, hardening, demo |
+| # | Milestone | Status |
+|---|---|---|
+| M0 | Project setup: git, dependencies, docs, environment | ✅ |
+| M1 | SEC ingestion: client, CIK resolution, company facts | ✅ |
+| M2 | Normalization + financial engine + PostgreSQL | ✅ |
+| M3 | Peer comparison + anomaly detection | ⬜ |
+| M4 | Filing RAG pipeline | ⬜ |
+| M5 | Multi-provider LLM manager | ⬜ |
+| M6 | LangGraph research agent | ⬜ |
+| M7 | Investment thesis monitoring | ⬜ |
+| M8 | Golden dataset + evaluation framework | ⬜ |
+| M9 | FastAPI endpoints | ⬜ |
+| M10 | React dashboard | ⬜ |
+| M11 | Integration, hardening, demo | ⬜ |
 
 Progress is logged in [IMPLEMENTATION_LOG.md](IMPLEMENTATION_LOG.md).
 

@@ -209,3 +209,149 @@ chains handling the drift confirmed above), period detection (annual vs
 quarterly vs YTD→standalone split), `financial_engine.py` (growth, margins,
 ROA, FCF, health ratios — pure and unit-tested), SQLAlchemy models + Alembic
 migration, PostgreSQL repositories.
+
+---
+
+## M2 — Financial Data Processing
+
+**Status:** ✅ COMPLETE
+**Date:** 2026-10-31
+
+### What was built
+
+| File | Purpose |
+|---|---|
+| `app/schemas/company.py` | Single source of truth: `Metric` (15 canonical metrics), `PeriodType` (INSTANT/ANNUAL/QUARTERLY/YTD), `FiscalPeriod` (FY/Q1–Q4), `INSTANT_METRICS`/`DURATION_METRICS` frozensets. Imported by normalizer, engine, DB, and (later) API so a string typo can't silently produce empty queries |
+| `app/ingestion/data_cleaner.py` | **Correctness heart.** XBRL concept mapping with priority chains (all concepts merged, highest-priority-per-period wins); period classification by date arithmetic (350–380d → annual, 80–100d → quarterly, else YTD); fiscal-year-end-month inference from annual facts; YTD→standalone-quarter splitting (Q2=H1−Q1, Q3=9M−H1, Q4=Annual−9M, missing input → NO output); latest-filed-wins dedup with restatement detection (keeps both values, flags, never hides). Pure functions, no I/O |
+| `app/services/financial_engine.py` | Deterministic metric engine: YoY growth (abs() denominator for sign-correct loss recovery), margins, ROA, FCF, current ratio, debt-to-assets, earnings-cashflow divergence. Every metric carries formula name + input values + source accession numbers + timestamp. Division-by-zero → `value=None` with recorded reason, never inf/nan |
+| `app/database/models.py` | SQLAlchemy 2.0 typed models: `Company`, `FinancialFact` (as-filed facts with restatement columns `is_restated`/`value_original`), `FinancialMetric` (calculated metrics with `formula`/`inputs_json`/`source_accessions_json`). Only portable column types so tests run on SQLite while production uses PostgreSQL |
+| `app/database/postgres.py` | Cached engine (one connection pool per process), context-manager session (commit/rollback/close automatic), `create_tables()` for dev, `reset_engine()` for tests |
+| `app/database/repositories.py` | `CompanyRepository` (upsert), `FactRepository` (full-replace per company — idempotent), `MetricRepository` (upsert keyed on company+metric+period). Single place holding DB query knowledge |
+| `scripts/process_company.py` | End-to-end CLI: resolve → fetch/load raw → normalize → store facts → calculate metrics → store metrics → print report with recent annual metrics for sanity-checking |
+| `scripts/verify_database.py` | DB verification CLI (uses SQLAlchemy, not psql — no password in shell commands): totals, per-company metrics with formulas, restated-fact samples with citation URLs, derived-quarter listing |
+| `migrations/` + `alembic.ini` | Alembic initialized; `env.py` reads URL from app `Settings` (never from .ini), wires `Base.metadata` for autogenerate; initial migration `b33bfba96b16` (3 tables, 4 indexes, FKs, unique constraint, working downgrade) |
+| `tests/test_data_cleaner.py` | 25 tests: period classification, fiscal-year rules (incl. comparative-mislabel regression), FYE-month inference, concept fallback, restatement detection, YTD splitting (incl. missing-input and negative-value guards), duplicate-quarter prevention |
+| `tests/test_financial_engine.py` | 14 tests, all hand-verified golden values (e.g. loss halving −50→−25 = +50% growth, MSFT FY2025 margins) |
+| `tests/test_database.py` | 8 tests on SQLite in-memory: idempotent re-ingestion (no duplicate rows), stale-fact removal, restatement persistence, metric upsert overwrite, provenance column survival |
+
+### Key design decisions
+
+1. **Fact vs Metric separation in the database.** `FinancialFact` = what the
+   company reported (VERIFIED FACT layer); `FinancialMetric` = what we
+   calculated (CALCULATED METRIC layer). This maps directly to the report
+   requirement: every number shown in the UI will be tagged with its layer.
+2. **All chain concepts merged, priority-per-period wins.** Not "pick the
+   first tag with data" — see Bug 3 below, which real data proved wrong.
+3. **Period classification by date arithmetic, never labels.** SEC's `fp`/`fy`
+   fields describe the *filing*, not the *fact* (comparative columns inherit
+   the filing's labels). Date spans are ground truth.
+4. **Fiscal-year rules differ by period type** (Bug 2 below):
+   annual → end-date year; quarterly/YTD → date arithmetic against inferred
+   fiscal-year-end month.
+5. **Missing input → no output.** Quarter-splitting emits nothing when an
+   input is absent or a derived value fails sign-sanity. Correctly incomplete
+   beats confidently wrong.
+6. **Restatements are surfaced, not hidden.** Later filing with different
+   value → latest wins, `is_restated=True`, `value_original` preserved,
+   change logged with both accession numbers.
+7. **Provenance on every row.** Facts carry concept/form/accession/URL;
+   metrics carry formula/inputs/accessions/timestamp. Any displayed number is
+   reproducible by hand — the audit requirement for financial research.
+8. **Full-replace fact ingestion (idempotent).** Re-running always converges
+   to the same state; trade-off (loses per-run derived-quarter history) is
+   documented — raw filings on disk remain the audit trail.
+
+### Real-data bugs found & fixed (the important part)
+
+**Every one of these was caught by running against LIVE SEC data or by a
+failing golden test — none would have been found by assumptions alone.**
+
+1. **Instant-metric slot lookup (test failure).** ROA/debt-to-assets mixed
+   duration facts (net income) with instant facts (total assets), but looked
+   up assets in the annual slot where instants never live → always None.
+   Fixed with `_get_instant()` helper forcing `PeriodType.INSTANT` for
+   balance-sheet metrics.
+2. **Off-by-one fiscal year for quarters (live-data verification).** Before
+   the fix, MSFT FY2025 Q4 showed $101.3B instead of the true $76.4B and
+   FY2025 Q1 showed FY2024's $56.5B. Root cause: a 10-Q's *comparative*
+   prior-year quarters carry the *filing's* `fy` label (Sep-2023 comparative
+   inside the FY2025-Q1 10-Q is labelled fy=2025). Fixed by deriving quarterly
+   fiscal years from period-end date + inferred fiscal-year-end month
+   (`end.year + (1 if end.month > fye_month else 0)`), inferring fye_month
+   as the modal month of annual-fact end dates. Verified: MSFT (June FY-end),
+   AAPL (September), NVDA (January) all produce quarters summing exactly to
+   their annual totals.
+3. **Concept-drift direction is per-company (live-data verification).**
+   MSFT uses the *modern* ASC-606 tag for recent years (chain order:
+   modern-first works). NVDA does the **opposite** — modern tag for older
+   years, generic `Revenues` for FY2023–26. The original "first chain tag
+   with data wins" hid NVDA's entire recent history (most recent annual
+   revenue in DB was FY2022 $26.9B; true FY2026 revenue is $215.9B). Fixed
+   by iterating ALL chain concepts in priority order with a per-period
+   `claimed` map: highest-priority concept wins each period, later concepts
+   fill gaps. After fix: NVDA FY2023 $27.0B / FY2024 $60.9B / FY2025 $130.5B
+   / FY2026 $215.9B — all present, MSFT/AAPL unchanged (regression-checked).
+4. **Duplicate as-filed + derived quarters (live-data verification).** Q2/Q3
+   appeared twice (once filed directly by MSFT, once derived by the
+   splitter) — would duplicate points on charts and corrupt time-series
+   queries. Fixed by passing existing quarterly facts into the splitter so
+   it never derives a period that is already as-filed. Result: 278 → 93
+   derived quarters for MSFT, each quarter stored exactly once.
+5. **Q2 derivation miss (failing golden test).** A 90-day Q1 fact is
+   *correctly* classified QUARTERLY, so the splitter (which only indexed
+   YTD facts) couldn't find its Q1 input → Q2 never derived. Fixed by
+   letting the splitter use existing quarterly-Q1 facts as inputs.
+6. **Repository upsert bugs (failing DB tests).** `upsert_metrics` forgot
+   `fiscal_year`/`fiscal_period` (NOT NULL + part of unique identity — would
+   crash PostgreSQL) and assigned an ISO *string* to a `DateTime` column.
+   Both surfaced by SQLite tests reading the error output.
+7. **Annual comparative dedup (failing golden test).** FY2024 period
+   re-reported in the FY2025 10-K carries `fy=2025` → two "different" fiscal
+   years for one period. Fixed by using end-date year for annual facts.
+
+### Tests performed (all executed, outputs shown in session)
+
+1. **Unit suites:** `pytest -q` → **76 passed** (25 cleaner + 14 engine +
+   8 database + 25 M1 + 3 M0 + 2 conftest/smoke).
+2. **End-to-end live run:** `python scripts/process_company.py MSFT AAPL NVDA`
+   → exit 0; MSFT 1377 facts / AAPL 1377 / NVDA 1300.
+3. **DB verification:** `python scripts/verify_database.py` → 3 companies,
+   4054 facts, 3261 metrics.
+4. **Hand-verified values vs published figures:**
+   - MSFT FY2025: revenue growth 14.93%, operating margin 45.62%
+     (128,528/281,724), net margin 36.15%, FCF $71.6B ✓
+   - MSFT FY2025 quarters: 65,585+69,632+70,066+76,441 = **281,724M = annual
+     exactly** ✓ (no double-counting)
+   - NVDA FY2026 quarters: 44.1+46.7+57.0+68.1 = **215.9B = annual** ✓
+   - AAPL FY2025: revenue growth 6.43%, operating margin 31.97%, FCF $98.8B ✓
+5. **Alembic:** initial migration generated (autogenerate detected all 3
+   tables + 4 indexes + unique constraint), applied via `upgrade head`,
+   `alembic current` → `b33bfba96b16 (head)`; pipeline re-run after migration
+   produced identical counts (schema equivalence proven).
+6. **Regression checks:** after each fix, re-ran full suite AND re-verified
+   MSFT/AAPL values unchanged before accepting the NVDA fix.
+
+### Restatement observations (real accounting history)
+
+- 338–393 restatements per company — mostly **gross profit** restated between
+  filings (visible in verify output, e.g. MSFT FY2014 $11.84B → $14.43B in a
+  later 10-K/A). Both values retained; every row cites its accession URL.
+- NVDA FY2009 operating-cash-flow YTD inputs misaligned → negative derived
+  value **rejected with a warning** (correctly incomplete, not wrong).
+
+### Current limitations / next steps
+
+- DB stores USD *full values* as Float; raw JSON on disk remains the exact
+  audit trail (documented trade-off: JSON numbers are already lossy).
+- Instant (balance-sheet) facts are keyed to fiscal slots from SEC `fp`
+  labels; quarterly balance-sheet history is present but M3+ should verify
+  slot alignment per company before charting.
+- Alembic `script.py.mako` docstring is default; fine for now.
+- No incremental ingestion yet — every run re-fetches raw payload (fast, and
+  keeps the pipeline idempotent; M4 will add filing-level diffing).
+
+### Next milestone
+
+**M3 — Peer comparison & anomaly detection:** cross-company metric tables,
+peer-relative z-scores, trend/acceleration signals, investigation-flag rules
+(all labeled as signals, never fraud verdicts).
