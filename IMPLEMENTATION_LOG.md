@@ -121,9 +121,91 @@ git add -A && git commit                              # ee8999d
   (User has created the `finsight` database.)
 - Frontend remains the untouched Vite scaffold.
 
+### Next milestone (originally planned, now completed below)
+
+**M1 — SEC Data Ingestion.**
+
+---
+
+## M1 — SEC Data Ingestion
+
+**Status:** ✅ COMPLETE
+**Date:** 2026-10-31
+
+### What was built
+
+| File | Purpose |
+|---|---|
+| `app/config.py` | Typed `Settings` via pydantic-settings; validates SEC User-Agent (rejects empty/placeholder), defines SEC URLs, rate limit (8 req/s), retry/backoff knobs, data paths |
+| `app/utils/logging.py` | Consistent timestamped logging to console + rotating file (5 MB × 3); idempotent `configure_logging` |
+| `app/ingestion/sec_client.py` | `SECClient`: httpx with SEC-compliant User-Agent, gzip; `RateLimiter` (min-interval, thread-safe, injectable sleep/clock); bounded retries with exponential backoff + `Retry-After` on 429/5xx/network errors; fail-fast on 403/404/400; `resolve_company` (exact ticker → name substring, ambiguous → error); `get_company_facts`; `save_raw` |
+| `app/ingestion/company_facts.py` | `fetch_and_save` (resolve → fetch → persist); `summarize` (concept/form/fiscal-year counts, key-concept presence); `_is_annual_period` (date-duration heuristic, ~365 days) |
+| `scripts/ingest_company.py` | CLI: `python scripts/ingest_company.py MSFT [AAPL ...]`; prints inspection summary; clean error per company; non-zero exit on any failure |
+| `tests/test_sec_ingestion.py` | 25 tests, ALL via `httpx.MockTransport` (zero real SEC requests) |
+
+### Key design decisions
+
+1. **Asymmetric retry policy.** 429/5xx/timeout/connection → retry (max 3) with
+   exponential backoff (0.5s, 1s, 2s), honoring SEC's `Retry-After` header when
+   present. 403/404/400 → fail immediately (retrying a client-side error just
+   hammers SEC and looks like abuse).
+2. **Min-interval rate limiter** (not sliding-window): guarantees average AND
+   instantaneous rate stay under 10 req/s; we use 8 to leave retry headroom.
+3. **Injectable transport + sleep + clock** in `SECClient`: tests simulate
+   429/500/timeout deterministically without quota burn or flaky timing.
+4. **Raw storage is byte-faithful**: the audit trail M2+ can always diff
+   against a fresh SEC response.
+
+### Real-data findings (Microsoft, CIK 0000789019)
+
+- **9.93 MB** raw payload; **572 concepts** across `us-gaap`, `dei`, `ecd`.
+- Forms: 10-Q ×20373, 10-K ×10429, 8-K ×1770, 10-Q/A ×440, DEF 14A ×40.
+- **19 fiscal years** of annual facts (2008–2026).
+- **Concept drift confirmed live:** legacy `Revenues` tag only covers ~2010-era
+  facts; modern revenue is `RevenueFromContractWithCustomerExcludingAssessedTax`
+  (ASC 606 adoption). All 11 key concepts for M2 exist under modern tags.
+- **Duplicate FY2025 revenue fact explained:** the same value ($281,724M)
+  appears in the FY2025 10-K (filed 2025-07-30) AND the FY2026 10-K (filed
+  2026-07-29, comparative prior-year). Same value → M2 dedups by
+  `(concept, period)`; a *different* value would signal a true restatement to
+  surface, not hide.
+- Recent annual facts (as filed): FY2025 revenue $281.7B / op income $128.5B /
+  net income $101.8B; FY2026 revenue $331.8B / op income $155.2B / net income
+  $133.7B.
+
+### Tests performed
+
+1. **Unit (mocked HTTP):** 25/25 pass — resolution, URL zero-padding,
+   User-Agent header, retry/backoff/Retry-After, 403/404 fail-fast, timeout
+   retry, rate-limiter intervals, raw round-trip, summarize counts, empty
+   payload safety.
+2. **Integration (live SEC):** `python scripts/ingest_company.py MSFT` →
+   exit 0; ticker→CIK resolution, HTTP 200, 9.93 MB saved, summary printed.
+3. **Full suite:** 28/28 pass (`pytest -q`).
+
+### Bugs found & fixed (during M1)
+
+All three initial failures were **test-side** (the client code was correct):
+
+1. 403 test regex `User-Agent` (hyphen) didn't match message `SEC_USER_AGENT`
+   (underscore) → assert on `403 Forbidden` instead.
+2. Backoff test also captured the rate limiter's tiny sleeps (one shared
+   injected `sleep`) → filter recorded delays to backoff-sized (`>= 0.5`).
+3. `no_sleep_when_interval_elapsed` premise was inverted (frozen clock = zero
+   elapsed = sleeping is correct) → advance the fake clock past the interval.
+
+### Current limitations / next steps
+
+- Filing download/parse (M4) will reuse `SECClient` unchanged.
+- `summarize` is inspection-only; M2's normalizer parses facts into
+  `FinancialFact` rows in PostgreSQL.
+- Live SEC fetch is exercised once per milestone (by design); CI/regression
+  tests stay on `MockTransport`.
+
 ### Next milestone
 
-**M1 — SEC Data Ingestion:** `sec_client.py` (httpx, User-Agent, throttling,
-retries), company identifier resolution (ticker/CIK), Company Facts retrieval,
-raw JSON storage, `scripts/ingest_company.py`. First working target: retrieve
-and inspect Microsoft's historical financial facts.
+**M2 — Financial Data Processing:** XBRL concept mapping (per-company fallback
+chains handling the drift confirmed above), period detection (annual vs
+quarterly vs YTD→standalone split), `financial_engine.py` (growth, margins,
+ROA, FCF, health ratios — pure and unit-tested), SQLAlchemy models + Alembic
+migration, PostgreSQL repositories.
