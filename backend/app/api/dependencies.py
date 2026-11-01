@@ -1,8 +1,8 @@
 """Typed dependencies for services injected through ``app.state.components``."""
 
-from typing import Any, cast
+from typing import Any, Callable, cast
 
-from fastapi import Request
+from fastapi import HTTPException, Request
 
 from app.database.postgres import get_session_factory
 from app.graph.agent import ResearchAgent
@@ -24,6 +24,51 @@ def _require_component(request: Request, name: str) -> Any:
 def get_research_agent(request: Request) -> ResearchAgent:
     """Get the injected research agent; never constructs a live agent here."""
     return cast(ResearchAgent, _require_component(request, "research_agent"))
+
+
+def get_research_agent_factory(request: Request) -> Callable[[], ResearchAgent]:
+    """Return a lazy, app-cached agent factory using injected dependencies.
+
+    Components are injected by the application owner. The factory receives
+    the session factory, store, embedder, and manager explicitly, then its
+    resulting agent is cached on this app's state so its InMemorySaver remains
+    stable for supplied thread IDs without sharing the cache across apps.
+    """
+    components = request.app.state.components
+    existing_agent = components.get("research_agent")
+    if existing_agent is not None:
+        return lambda: cast(ResearchAgent, existing_agent)
+
+    required = ("store", "embedder", "manager")
+    if any(components.get(name) is None for name in required):
+        raise HTTPException(
+            status_code=503,
+            detail="Research service is not configured.",
+        )
+
+    session_factory = components.get("session_factory")
+    if session_factory is None:
+        session_factory = get_session_factory()
+    factory = components.get("research_agent_factory", ResearchAgent)
+    if not callable(factory):
+        raise HTTPException(
+            status_code=503,
+            detail="Research service is not configured.",
+        )
+
+    def get_or_create_agent() -> ResearchAgent:
+        agent = getattr(request.app.state, "research_agent", None)
+        if agent is None:
+            agent = factory(
+                session_factory=session_factory,
+                store=components["store"],
+                embedder=components["embedder"],
+                manager=components["manager"],
+            )
+            request.app.state.research_agent = agent
+        return cast(ResearchAgent, agent)
+
+    return get_or_create_agent
 
 
 def get_store(request: Request) -> VectorStore:

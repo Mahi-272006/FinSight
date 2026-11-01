@@ -113,7 +113,7 @@ class LLMManager:
                     failures.append((provider.name, cause))
                     logger.warning(
                         "LLM provider %s failed (%s); failing over%s",
-                        provider.name, cause,
+                        provider.name, type(exc).__name__,
                         "" if provider is not self._providers[-1] else " (last provider)",
                     )
                     break
@@ -186,7 +186,9 @@ class LLMManager:
                     # branch errors entirely (no logging in fallbacks.py):
                     # log HERE or a fallback's cause is invisible.
                     logger.warning(
-                        "tool chain %s failed: %s", provider_name, classified,
+                        "tool chain %s failed (%s)",
+                        provider_name,
+                        type(classified).__name__,
                     )
                     if classified is first:
                         raise  # already ours: preserve the exact subtype
@@ -196,9 +198,9 @@ class LLMManager:
                     or self._rate_limit_wait_seconds
                 )
                 logger.warning(
-                    "tool chain %s rate limited: %s; waiting %.1fs once "
+                    "tool chain %s rate limited; waiting %.1fs once "
                     "before retrying",
-                    provider_name, classified, waited,
+                    provider_name, waited,
                 )
                 self._sleep(waited)
             try:
@@ -206,13 +208,16 @@ class LLMManager:
             except Exception as second:  # noqa: BLE001
                 if isinstance(second, LLMProviderError):
                     logger.warning(
-                        "tool chain %s retry failed: %s",
-                        provider_name, second,
+                        "tool chain %s retry failed (%s)",
+                        provider_name,
+                        type(second).__name__,
                     )
                     raise  # one retry only; our taxonomy, next provider up
                 classified = _classify(second, provider_name)
                 logger.warning(
-                    "tool chain %s retry failed: %s", provider_name, classified,
+                    "tool chain %s retry failed (%s)",
+                    provider_name,
+                    type(classified).__name__,
                 )
                 raise classified from second
 

@@ -1781,4 +1781,54 @@ Executed in the project virtual environment:
   **144 passed**.
 - Full backend regression after review fixes: **498 passed in 9.34s**.
 
-Stage 6 (Research API) has not started.
+Stage 6 (Research API) begins below.
+
+### M9 Stage 6 — Research API
+
+**Status:** ✅ IMPLEMENTED; awaiting Checkpoint 2 review
+**Date:** 2026-11-01
+
+#### What was built
+
+- Added synchronous `POST /api/v1/research` with validated ticker, non-empty
+  question, `save=true` default, and optional thread ID. A missing thread ID
+  receives a server-generated UUID4; the supplied ID is passed through for
+  conversation continuation.
+- Added a lazy `get_research_agent_factory` dependency. It receives the
+  injected session factory, store, embedder, and manager; the resulting agent
+  is cached on app state so its process-local `InMemorySaver` is reused.
+  Injected agents and factories keep tests independent of real providers.
+- Added a process-wide lock around agent construction and synchronous
+  `ResearchAgent.run()`. The lock serializes free-tier model calls and
+  checkpointer access; no report persistence is performed under it.
+- The response serializes every field from the actual `ResearchResult`, plus
+  the effective `thread_id` and `save_requested` metadata. Unknown companies
+  return 404; provider/configuration failures return sanitized 503 responses;
+  unexpected agent failures use the sanitized 500 handler. Failures are never
+  converted to fabricated successful results.
+- `save` is accepted and defaults to true, but durable research-report saving
+  is not available until Stage 7 adds the reports table. Stage 6 reports the
+  requested save intent and does not claim a report was persisted.
+- Tests use scripted fake agents, managers, store, and embedder. They cover
+  result serialization, validation, generated and supplied thread IDs,
+  save-request values, unknown companies, provider failures, factory caching,
+  and concurrent requests. The agent cache is stored on each app's state so a
+  shared injected component mapping cannot accidentally share a checkpointer
+  between separate app instances. Failed construction is not cached, allowing
+  a later request to retry. Provider and unexpected-error logs record request
+  context and exception type without formatting exception text or tracebacks,
+  which could contain secrets. The existing LLM manager's provider-failure
+  logs were also changed to record provider and exception class only; raw
+  provider error text remains available to internal error classification but
+  is not written to logs or HTTP responses.
+
+#### Verification
+
+Executed in the project virtual environment:
+
+- Focused Research API tests after review fixes: **17 passed**.
+- Research API, agent/graph, and existing API regression tests after review
+  fixes, including LLM manager tests: **154 passed**.
+- Full backend regression after review fixes: **515 passed in 10.09s**.
+
+Stage 7 (Reports and Watchlist) has not started.

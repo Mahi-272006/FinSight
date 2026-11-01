@@ -32,6 +32,7 @@ from app.api.health import router as health_router
 from app.api.companies import router as companies_router
 from app.api.anomalies import router as anomalies_router
 from app.api.thesis import router as thesis_router
+from app.api.research import router as research_router
 from app.config import APP_VERSION, get_settings
 from app.services.llm_providers import LLMAllProvidersFailed, LLMConfigurationError
 from app.services.thesis_service import ThesisInputError, ThesisNotFoundError
@@ -227,12 +228,14 @@ def create_app(components: dict[str, Any] | None = None) -> FastAPI:
         """LLM chain is misconfigured -- 503 with a safe, generic message.
 
         We deliberately do NOT forward ``str(exc)`` to the client because it
-        may contain provider names, model IDs, or config hints that we don't
-        want to expose.  The real message goes to the server log only.
+        may contain provider names, model IDs, or configuration details. The
+        exception text is also omitted from logs to avoid recording secrets.
         """
         logger.error(
-            "[%s] LLMConfigurationError: %s",
-            getattr(request.state, "request_id", "-"), exc,
+            "[%s] LLMConfigurationError on %s %s",
+            getattr(request.state, "request_id", "-"),
+            request.method,
+            request.url.path,
         )
         return JSONResponse(
             status_code=503,
@@ -245,8 +248,10 @@ def create_app(components: dict[str, Any] | None = None) -> FastAPI:
     ) -> JSONResponse:
         """Every provider in the chain failed -- 503, sanitized message only."""
         logger.error(
-            "[%s] LLMAllProvidersFailed: %s",
-            getattr(request.state, "request_id", "-"), exc,
+            "[%s] LLMAllProvidersFailed on %s %s",
+            getattr(request.state, "request_id", "-"),
+            request.method,
+            request.url.path,
         )
         return JSONResponse(
             status_code=503,
@@ -259,9 +264,9 @@ def create_app(components: dict[str, Any] | None = None) -> FastAPI:
     ) -> JSONResponse:
         """Catch-all for anything we didn't anticipate -- 500, never leaks internals.
 
-        The real traceback is logged at ERROR level; the client receives only
-        a fixed string.  This prevents stack traces, DSNs, file paths, or any
-        other internal detail from appearing in API responses.
+        Log safe request context and the exception type, without formatting
+        exception text or a traceback that could contain secrets. The client
+        receives only a fixed string.
         """
         request_id = getattr(request.state, "request_id", None)
         if request_id is None:
@@ -270,9 +275,10 @@ def create_app(components: dict[str, Any] | None = None) -> FastAPI:
             request_id = uuid.uuid4().hex[:8]
             request.state.request_id = request_id
 
-        logger.exception(
-            "[%s] Unhandled exception on %s %s",
+        logger.error(
+            "[%s] Unhandled %s on %s %s",
             request_id,
+            type(exc).__name__,
             request.method,
             request.url.path,
         )
@@ -294,9 +300,9 @@ def create_app(components: dict[str, Any] | None = None) -> FastAPI:
     app.include_router(companies_router, prefix=API_PREFIX)
     app.include_router(anomalies_router, prefix=API_PREFIX)
     app.include_router(thesis_router, prefix=API_PREFIX)
+    app.include_router(research_router, prefix=API_PREFIX)
     # Later M9 stages:
     # app.include_router(thesis_router,    prefix=API_PREFIX)
-    # app.include_router(research_router,  prefix=API_PREFIX)
     # app.include_router(reports_router,   prefix=API_PREFIX)
 
     return app
