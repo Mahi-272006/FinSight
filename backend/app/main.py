@@ -33,9 +33,12 @@ from app.api.companies import router as companies_router
 from app.api.anomalies import router as anomalies_router
 from app.api.thesis import router as thesis_router
 from app.api.research import router as research_router
+from app.api.reports import router as reports_router
+from app.api.watchlist import router as watchlist_router
 from app.config import APP_VERSION, get_settings
 from app.services.llm_providers import LLMAllProvidersFailed, LLMConfigurationError
 from app.services.thesis_service import ThesisInputError, ThesisNotFoundError
+from app.services.report_service import ReportPersistenceError
 from app.utils.logging import configure_logging, get_logger
 
 logger = get_logger(__name__)
@@ -258,6 +261,22 @@ def create_app(components: dict[str, Any] | None = None) -> FastAPI:
             content={"detail": "LLM service is temporarily unavailable. Try again later."},
         )
 
+    @app.exception_handler(ReportPersistenceError)
+    async def report_persistence_handler(
+        request: Request, exc: ReportPersistenceError
+    ) -> JSONResponse:
+        """A failed report commit must never be presented as a saved result."""
+        logger.error(
+            "[%s] ReportPersistenceError on %s %s",
+            getattr(request.state, "request_id", "-"),
+            request.method,
+            request.url.path,
+        )
+        return JSONResponse(
+            status_code=503,
+            content={"detail": "Research completed, but report persistence failed."},
+        )
+
     @app.exception_handler(Exception)
     async def unhandled_exception_handler(
         request: Request, exc: Exception
@@ -301,9 +320,10 @@ def create_app(components: dict[str, Any] | None = None) -> FastAPI:
     app.include_router(anomalies_router, prefix=API_PREFIX)
     app.include_router(thesis_router, prefix=API_PREFIX)
     app.include_router(research_router, prefix=API_PREFIX)
+    app.include_router(reports_router, prefix=API_PREFIX)
+    app.include_router(watchlist_router, prefix=API_PREFIX)
     # Later M9 stages:
     # app.include_router(thesis_router,    prefix=API_PREFIX)
-    # app.include_router(reports_router,   prefix=API_PREFIX)
 
     return app
 

@@ -7,9 +7,13 @@ from typing import Callable
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
-from app.api.dependencies import get_research_agent_factory
+from app.api.dependencies import (
+    get_report_service_factory,
+    get_research_agent_factory,
+)
 from app.graph.agent import ResearchAgent
 from app.schemas.research import ResearchRequest, ResearchResponse
+from app.services.report_service import ReportService
 
 router = APIRouter(prefix="/research", tags=["research"])
 
@@ -23,6 +27,9 @@ _RESEARCH_EXECUTION_LOCK = threading.Lock()
 def run_research(
     payload: ResearchRequest,
     agent_factory: Callable[[], ResearchAgent] = Depends(get_research_agent_factory),
+    report_service_factory: Callable[[], ReportService] = Depends(
+        get_report_service_factory
+    ),
 ):
     """Run the existing ResearchAgent and return its actual structured result."""
     thread_id = payload.thread_id or str(uuid.uuid4())
@@ -40,11 +47,14 @@ def run_research(
             detail="Company not found.",
         )
 
-    # Report persistence is introduced in Stage 7. Keep the requested flag
-    # explicit in the response without pretending this Stage 6 endpoint saved
-    # a durable report.
+    # Persist only after graph execution and after releasing the process-wide
+    # agent lock. save=False never opens a report transaction.
+    report_id = None
+    if payload.save:
+        report_id = report_service_factory().save(result, thread_id=thread_id)
     return ResearchResponse(
         **asdict(result),
         thread_id=thread_id,
         save_requested=payload.save,
+        report_id=report_id,
     )

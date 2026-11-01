@@ -204,6 +204,35 @@ class InvestigationSignal(Base):
     detected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class ResearchReport(Base):
+    """Durable snapshot of one actual ResearchResult (M9 Stage 7)."""
+
+    __tablename__ = "research_reports"
+    __table_args__ = (
+        Index("ix_reports_ticker_created", "ticker", "created_at", "id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    cik: Mapped[int] = mapped_column(ForeignKey("companies.cik"), nullable=False)
+    ticker: Mapped[str] = mapped_column(String(10), nullable=False)
+    question: Mapped[str] = mapped_column(Text, nullable=False)
+    thread_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    result_json: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class WatchlistEntry(Base):
+    """One watchlist membership per canonical company CIK."""
+
+    __tablename__ = "watchlist_entries"
+
+    cik: Mapped[int] = mapped_column(
+        ForeignKey("companies.cik", ondelete="CASCADE"), primary_key=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    company: Mapped["Company"] = relationship(lazy="joined")
+
+
 # ---------------------------------------------------------------------------
 # M7: Investment thesis monitoring
 #

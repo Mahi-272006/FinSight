@@ -23,6 +23,8 @@ from app.database.models import (
     FinancialFact,
     FinancialMetric,
     InvestigationSignal,
+    ResearchReport,
+    WatchlistEntry,
 )
 from app.ingestion.data_cleaner import NormalizedFact
 from app.services.anomaly_detection import InvestigationSignal as SignalDataclass
@@ -338,4 +340,70 @@ class SignalRepository:
             InvestigationSignal.id,
         )
         stmt = stmt.offset(offset).limit(limit)
+        return list(self._session.execute(stmt).scalars())
+
+
+class ReportRepository:
+    """Create and page durable research-result snapshots."""
+
+    def __init__(self, session: Session):
+        self._session = session
+
+    def add(self, report: ResearchReport) -> ResearchReport:
+        self._session.add(report)
+        self._session.flush()
+        return report
+
+    def get(self, report_id: int) -> ResearchReport | None:
+        return self._session.get(ResearchReport, report_id)
+
+    def count_all(self) -> int:
+        return self._session.execute(
+            select(func.count()).select_from(ResearchReport)
+        ).scalar_one()
+
+    def list_page(self, limit: int, offset: int = 0) -> list[ResearchReport]:
+        stmt = (
+            select(ResearchReport)
+            .order_by(
+                ResearchReport.created_at.desc(),
+                ResearchReport.id.desc(),
+            )
+            .offset(offset)
+            .limit(limit)
+        )
+        return list(self._session.execute(stmt).scalars())
+
+
+class WatchlistRepository:
+    """Persist the set of companies on the user's single local watchlist."""
+
+    def __init__(self, session: Session):
+        self._session = session
+
+    def get(self, cik: int) -> WatchlistEntry | None:
+        return self._session.get(WatchlistEntry, cik)
+
+    def add(self, cik: int) -> WatchlistEntry:
+        entry = WatchlistEntry(cik=cik)
+        self._session.add(entry)
+        self._session.flush()
+        return entry
+
+    def delete(self, entry: WatchlistEntry) -> None:
+        self._session.delete(entry)
+        self._session.flush()
+
+    def count_all(self) -> int:
+        return self._session.execute(
+            select(func.count()).select_from(WatchlistEntry)
+        ).scalar_one()
+
+    def list_page(self, limit: int, offset: int = 0) -> list[WatchlistEntry]:
+        stmt = (
+            select(WatchlistEntry)
+            .order_by(WatchlistEntry.created_at.desc(), WatchlistEntry.cik)
+            .offset(offset)
+            .limit(limit)
+        )
         return list(self._session.execute(stmt).scalars())

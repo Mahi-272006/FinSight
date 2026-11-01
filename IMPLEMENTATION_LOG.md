@@ -1831,4 +1831,52 @@ Executed in the project virtual environment:
   fixes, including LLM manager tests: **154 passed**.
 - Full backend regression after review fixes: **515 passed in 10.09s**.
 
-Stage 7 (Reports and Watchlist) has not started.
+### M9 Stage 7 — Reports and Watchlist
+
+**Status:** ✅ IMPLEMENTED; awaiting Checkpoint 2 review
+**Date:** 2026-11-01
+
+#### What was built
+
+- Added research_reports, storing ticker, CIK, question, thread ID, creation
+  timestamp, and a JSON snapshot of every field from the actual
+  ResearchResult. The detail endpoint returns the stored JSON snapshot as-is;
+  the repository exposes deterministic paginated reads and report retrieval.
+- Connected save=true to a transaction-owning ReportService; the API
+  returns the committed report ID only after the database commit succeeds.
+  save=false skips report-service construction and writes no report.
+  Persistence failures roll back and return a sanitized 503 instead of a
+  successful response claiming a saved report.
+- Added watchlist_entries, keyed by company CIK with a foreign key and
+  database primary-key uniqueness. Supported tickers resolve through existing
+  company data. Adds/removals own and close their transaction; duplicate adds
+  return 409, unsupported companies and missing entries return 404. Reads use
+  request-scoped sessions and stable pagination.
+- Added separate, linear Alembic revisions:
+  9b0e3f75f1a2 (Reports, after 7cee87c1bedf) and
+  e41f7c6a93d0 (Watchlist, after 9b0e3f75f1a2).
+- Reports and Watchlist routes use injected service accessors for writes and
+  Depends(get_session) for reads. Report persistence occurs after the
+  ResearchAgent lock is released. Tests use fake agents and shared SQLite;
+  no LLM, embedding, or vector-store component is initialized.
+
+#### Verification
+
+- Focused Reports, Watchlist, Research API, and migration tests:
+  **31 passed**.
+- Related Reports/Watchlist, Research, database, migration, and existing API
+  regression group after review: **247 passed**.
+- Full backend regression after migration-test logging isolation:
+  **529 passed in 13.96s** (20 deprecation warnings).
+- SQLite migrations upgraded to head, downgraded to the prior Stage 6
+  revision, then upgraded again successfully. The test inserts a company at
+  the prior revision and verifies that its row survives the Stage 7 upgrades.
+- PostgreSQL was at 7cee87c1bedf; both revisions upgraded successfully to
+  e41f7c6a93d0. PostgreSQL inspection confirmed the report index, company
+  foreign keys, and CIK watchlist primary key. Alembic reported no metadata
+  differences.
+- PostgreSQL report/watchlist insert and read smoke checks passed in a
+  transaction that was rolled back. PostgreSQL downgrade/re-upgrade operations
+  also passed inside a rollback-only transaction, with both new tables empty.
+
+Stage 8 anomaly recomputation has not started.

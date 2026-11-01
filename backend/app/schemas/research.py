@@ -31,9 +31,8 @@ class ResearchRequest(BaseModel):
     thread_id: ThreadId | None = None
 
 
-class ResearchResponse(BaseModel):
-    """All fields from ResearchResult plus server thread and save intent."""
-
+class ResearchResultSchema(BaseModel):
+    """Pydantic representation of every field on ResearchResult."""
     question: str
     ticker: str
     company: dict[str, Any] | None
@@ -45,5 +44,11 @@ class ResearchResponse(BaseModel):
     iterations: int
     revises: int
     tool_calls: list[dict[str, Any]]
+
+
+class ResearchResponse(ResearchResultSchema):
+    """Actual result plus execution and durable-save metadata."""
+
     thread_id: str
     save_requested: bool
+    report_id: int | None = None

@@ -8,8 +8,10 @@ from app.database.postgres import get_session_factory
 from app.graph.agent import ResearchAgent
 from app.services.embeddings import Embedder
 from app.services.llm_manager import LLMManager
+from app.services.report_service import ReportService
 from app.services.thesis_service import ThesisService
 from app.services.vector_store import VectorStore
+from app.services.watchlist_service import WatchlistService
 
 
 def _require_component(request: Request, name: str) -> Any:
@@ -105,3 +107,37 @@ def get_thesis_service(request: Request) -> ThesisService:
         )
         components["thesis_service"] = service
     return cast(ThesisService, service)
+
+
+def get_report_service_factory(request: Request) -> Callable[[], ReportService]:
+    """Lazily construct the transaction-owning writer only when saving is requested."""
+    components = request.app.state.components
+
+    def get_service() -> ReportService:
+        service = components.get("report_service")
+        if service is None:
+            service = getattr(request.app.state, "report_service", None)
+        if service is None:
+            session_factory = components.get("session_factory")
+            if session_factory is None:
+                session_factory = get_session_factory()
+            service = ReportService(session_factory=session_factory)
+            request.app.state.report_service = service
+        return cast(ReportService, service)
+
+    return get_service
+
+
+def get_watchlist_service(request: Request) -> WatchlistService:
+    """Get an injected or app-cached watchlist writer."""
+    components = request.app.state.components
+    service = components.get("watchlist_service")
+    if service is None:
+        service = getattr(request.app.state, "watchlist_service", None)
+    if service is None:
+        session_factory = components.get("session_factory")
+        if session_factory is None:
+            session_factory = get_session_factory()
+        service = WatchlistService(session_factory=session_factory)
+        request.app.state.watchlist_service = service
+    return cast(WatchlistService, service)

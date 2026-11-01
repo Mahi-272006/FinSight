@@ -9,6 +9,7 @@ import pytest
 from fastapi import status
 
 from app.graph.agent import ResearchResult
+from app.database.models import Company
 from app.services.llm_manager import LLMManager
 from app.services.llm_providers import LLMAllProvidersFailed, LLMConfigurationError
 
@@ -31,6 +32,7 @@ class ScriptedResearchAgent:
         self.error = error
         self.delay = delay
         self.calls = []
+        self.results = []
         self._guard = threading.Lock()
         self.active = 0
         self.max_active = 0
@@ -45,7 +47,7 @@ class ScriptedResearchAgent:
                 time.sleep(self.delay)
             if self.error is not None:
                 raise self.error
-            return ResearchResult(
+            result = ResearchResult(
                 question=question,
                 ticker=ticker.upper(),
                 company=self.company,
@@ -64,6 +66,8 @@ class ScriptedResearchAgent:
                     }
                 ],
             )
+            self.results.append(result)
+            return result
         finally:
             with self._guard:
                 self.active -= 1
@@ -81,6 +85,9 @@ class RecordingAgentFactory:
 
 @pytest.fixture
 def research_setup(api_session_factory):
+    with api_session_factory() as session:
+        session.add(Company(cik=789019, ticker="MSFT", name="Microsoft Corp"))
+        session.commit()
     agent = ScriptedResearchAgent()
     factory = RecordingAgentFactory(agent)
     components = {
@@ -128,6 +135,7 @@ def test_research_serializes_actual_research_result_fields(research_client):
     assert body["revises"] == 0
     assert body["tool_calls"][0]["chunk_ids"] == ["0000789019-26-000001:3"]
     assert body["save_requested"] is True
+    assert isinstance(body["report_id"], int)
     assert factory.calls == [
         (
             research_client[1]["session_factory"],
