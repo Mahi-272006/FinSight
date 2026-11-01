@@ -1736,5 +1736,49 @@ Executed in the project virtual environment:
   **109 passed**.
 - Full backend regression after review fixes: **481 passed in 9.22s**.
 
-Anomaly recomputation remains Stage 8 and has not started. Stage 5 and later
+Anomaly recomputation remains Stage 8 and has not started. Stage 6 and later
 stages remain unstarted.
+
+### M9 Stage 5 — Thesis API
+
+**Status:** ✅ IMPLEMENTED; awaiting Checkpoint 2 review
+**Date:** 2026-11-01
+
+#### What was built
+
+- Mounted the thesis router under `/api/v1` with create, paginated list,
+  detail, assess, and paginated assessment-history endpoints.
+- Added request/response schemas for thesis creation, immutable condition
+  snapshots, deterministic condition evaluations, assessments, and paged
+  results. Input ticker, condition text, horizon, fiscal period, IDs, and
+  pagination values are validated.
+- Routes depend on `get_thesis_service` and do not use request-scoped
+  `get_session`; `ThesisService` continues to open, commit, and close its own
+  sessions for reads and writes. Added service-owned page queries for thesis
+  listings and assessment history while preserving existing unpaged service
+  methods for M7 callers.
+- Assessment status and per-condition verdicts continue to come from the
+  deterministic service. Optional LLM output supplies wording only. The
+  service's existing behavior of appending assessments and falling back to a
+  deterministic explanation on LLM errors is preserved.
+- Added API tests using injected `ThesisService` instances and fake managers;
+  no real providers or ML components are constructed. Tests cover committed
+  creation, validation, missing theses, paging, assessment status and history,
+  append-only behavior, LLM fallback, 503 mappings for failures that escape
+  the service, and rollback/session cleanup when creation fails after flush.
+- Thesis input and request-schema validation errors now return static messages;
+  validation diagnostics omit submitted values, and thesis-input diagnostics
+  remain server-side only.
+
+#### Verification
+
+Executed in the project virtual environment:
+
+- Focused Thesis API tests: **17 passed**.
+- Thesis API and Stage 1 exception-handler tests after error sanitization:
+  **46 passed**.
+- Thesis, service, dependency, exception-handler, and database regressions:
+  **144 passed**.
+- Full backend regression after review fixes: **498 passed in 9.34s**.
+
+Stage 6 (Research API) has not started.

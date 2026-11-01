@@ -24,12 +24,14 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.api.health import router as health_router
 from app.api.companies import router as companies_router
 from app.api.anomalies import router as anomalies_router
+from app.api.thesis import router as thesis_router
 from app.config import APP_VERSION, get_settings
 from app.services.llm_providers import LLMAllProvidersFailed, LLMConfigurationError
 from app.services.thesis_service import ThesisInputError, ThesisNotFoundError
@@ -191,12 +193,32 @@ def create_app(components: dict[str, Any] | None = None) -> FastAPI:
     async def thesis_input_handler(
         request: Request, exc: ThesisInputError
     ) -> JSONResponse:
-        """Caller sent bad input -- 400 with validation message."""
+        """Caller sent bad thesis input -- 400 with a static safe message."""
         logger.info(
             "[%s] ThesisInputError: %s",
             getattr(request.state, "request_id", "-"), exc,
         )
-        return JSONResponse(status_code=400, content={"detail": str(exc)})
+        return JSONResponse(
+            status_code=400,
+            content={"detail": "Invalid thesis input."},
+        )
+
+    @app.exception_handler(RequestValidationError)
+    async def request_validation_handler(
+        request: Request, exc: RequestValidationError
+    ) -> JSONResponse:
+        """Return 422 without reflecting submitted values or validation data."""
+        logger.info(
+            "[%s] RequestValidationError on %s %s (%d issue(s))",
+            getattr(request.state, "request_id", "-"),
+            request.method,
+            request.url.path,
+            len(exc.errors()),
+        )
+        return JSONResponse(
+            status_code=422,
+            content={"detail": "Request validation failed."},
+        )
 
     @app.exception_handler(LLMConfigurationError)
     async def llm_config_handler(
@@ -271,6 +293,7 @@ def create_app(components: dict[str, Any] | None = None) -> FastAPI:
     app.include_router(health_router, prefix=API_PREFIX)
     app.include_router(companies_router, prefix=API_PREFIX)
     app.include_router(anomalies_router, prefix=API_PREFIX)
+    app.include_router(thesis_router, prefix=API_PREFIX)
     # Later M9 stages:
     # app.include_router(thesis_router,    prefix=API_PREFIX)
     # app.include_router(research_router,  prefix=API_PREFIX)

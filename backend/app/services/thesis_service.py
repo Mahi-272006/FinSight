@@ -534,35 +534,52 @@ class ThesisService:
                 "status": thesis.status or "Unassessed",
                 "created_at": thesis.created_at,
                 "conditions": [_condition_dict(c) for c in conditions],
-                "assessments": [
-                    {
-                        "id": a.id,
-                        "assessed_at": a.assessed_at,
-                        "status": a.status,
-                        "status_changed_from": a.status_changed_from,
-                        "summary": json.loads(a.summary_json or "[]"),
-                        "explanation": a.explanation,
-                        "explanation_source": a.explanation_source,
-                        "signals": json.loads(a.signals_json or "[]"),
-                    }
-                    for a in assessments
-                ],
+                "assessments": [_assessment_dict(a) for a in assessments],
+            }
+
+    def get_assessment_history_page(
+        self, thesis_id: int, limit: int, offset: int = 0
+    ) -> dict:
+        """Read one stable page of append-only assessments for a thesis."""
+        with self._session_factory() as session:
+            if session.get(Thesis, thesis_id) is None:
+                raise ThesisNotFoundError(f"thesis {thesis_id} not found")
+            query = session.query(ThesisAssessment).filter(
+                ThesisAssessment.thesis_id == thesis_id
+            )
+            total = query.count()
+            rows = (
+                query.order_by(ThesisAssessment.assessed_at, ThesisAssessment.id)
+                .offset(offset)
+                .limit(limit)
+                .all()
+            )
+            return {
+                "items": [_assessment_dict(row) for row in rows],
+                "total": total,
+                "offset": offset,
+                "limit": limit,
             }
 
     def list_theses(self) -> list[dict]:
         with self._session_factory() as session:
             theses = session.query(Thesis).order_by(Thesis.id).all()
-            return [
-                {
-                    "id": t.id,
-                    "ticker": t.ticker,
-                    "statement": t.statement,
-                    "horizon": t.horizon,
-                    "status": t.status or "Unassessed",
-                    "created_at": t.created_at,
-                }
-                for t in theses
-            ]
+            return [_thesis_list_item(t) for t in theses]
+
+    def list_theses_page(self, limit: int, offset: int = 0) -> dict:
+        """Return a paginated list and its total using one service-owned session."""
+        with self._session_factory() as session:
+            query = session.query(Thesis)
+            total = query.count()
+            theses = (
+                query.order_by(Thesis.id).offset(offset).limit(limit).all()
+            )
+            return {
+                "items": [_thesis_list_item(thesis) for thesis in theses],
+                "total": total,
+                "offset": offset,
+                "limit": limit,
+            }
 
     # -- internals ----------------------------------------------------------
 
@@ -713,4 +730,30 @@ def _condition_dict(cond: ThesisCondition) -> dict:
         "fiscal_year": cond.fiscal_year,
         "fiscal_period": cond.fiscal_period,
         "creation_evidence": json.loads(cond.evidence_json or "{}"),
+    }
+
+
+def _assessment_dict(assessment: ThesisAssessment) -> dict:
+    """Serialize one immutable assessment row for details and history routes."""
+    return {
+        "id": assessment.id,
+        "assessed_at": assessment.assessed_at,
+        "status": assessment.status,
+        "status_changed_from": assessment.status_changed_from,
+        "summary": json.loads(assessment.summary_json or "[]"),
+        "explanation": assessment.explanation,
+        "explanation_source": assessment.explanation_source,
+        "signals": json.loads(assessment.signals_json or "[]"),
+    }
+
+
+def _thesis_list_item(thesis: Thesis) -> dict:
+    """Serialize the common list view without exposing mutable ORM rows."""
+    return {
+        "id": thesis.id,
+        "ticker": thesis.ticker,
+        "statement": thesis.statement,
+        "horizon": thesis.horizon,
+        "status": thesis.status or "Unassessed",
+        "created_at": thesis.created_at,
     }
