@@ -1,4 +1,4 @@
-"""Read-only API for persisted investigation signals."""
+"""Read persisted investigation signals and run explicit recomputations."""
 
 import json
 from typing import Annotated
@@ -6,13 +6,24 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from sqlalchemy.orm import Session
 
+from app.api.dependencies import get_anomaly_service
+from app.database.models import InvestigationSignal
 from app.database.postgres import get_session
 from app.database.repositories import CompanyRepository, SignalRepository
-from app.database.models import InvestigationSignal
 from app.schemas.api_anomaly import (
+    AnomalyRecomputeRequest,
+    AnomalyRecomputeResponse,
     InvestigationSignalPage,
     InvestigationSignalResponse,
     SignalType,
+)
+from app.services.anomaly_service import (
+    AnomalyCompanyNotFoundError,
+    AnomalyRecomputeError,
+    AnomalyService,
+    InsufficientAnomalyDataError,
+    PersistedSignal,
+    UnsupportedAnomalyTickerError,
 )
 
 router = APIRouter(prefix="/anomalies", tags=["anomalies"])
@@ -30,7 +41,9 @@ PageLimit = Annotated[int, Query(ge=1, le=100, description="Maximum rows per pag
 PageOffset = Annotated[int, Query(ge=0, description="Number of rows to skip.")]
 
 
-def _signal_response(row: InvestigationSignal) -> InvestigationSignalResponse:
+def _signal_response(
+    row: InvestigationSignal | PersistedSignal,
+) -> InvestigationSignalResponse:
     """Decode the stored evidence while preserving its values and accessions."""
     evidence = json.loads(row.evidence_json) if row.evidence_json else {}
     accessions = (
@@ -50,6 +63,47 @@ def _signal_response(row: InvestigationSignal) -> InvestigationSignalResponse:
         evidence=evidence if isinstance(evidence, dict) else {},
         source_accessions=accessions if isinstance(accessions, list) else [],
         detected_at=row.detected_at,
+    )
+
+
+@router.post("/recompute", response_model=AnomalyRecomputeResponse)
+def recompute_company_signals(
+    payload: AnomalyRecomputeRequest,
+    service: AnomalyService = Depends(get_anomaly_service),
+):
+    """Run real deterministic rules over stored annual metrics and persist them."""
+    try:
+        cik, ticker, rows = service.recompute(payload.ticker)
+    except UnsupportedAnomalyTickerError:
+        raise HTTPException(
+            status_code=422,
+            detail="Ticker is outside the supported company scope.",
+        ) from None
+    except AnomalyCompanyNotFoundError:
+        raise HTTPException(status_code=404, detail="Company not found.") from None
+    except InsufficientAnomalyDataError:
+        raise HTTPException(
+            status_code=422,
+            detail="Insufficient annual financial data to recompute signals.",
+        ) from None
+    except AnomalyRecomputeError:
+        raise HTTPException(
+            status_code=500,
+            detail="Investigation signal recomputation failed.",
+        ) from None
+    except Exception:
+        # Injected implementations and unforeseen failures receive the same
+        # sanitized contract as the production service.
+        raise HTTPException(
+            status_code=500,
+            detail="Investigation signal recomputation failed.",
+        ) from None
+
+    return AnomalyRecomputeResponse(
+        cik=cik,
+        ticker=ticker,
+        total=len(rows),
+        items=[_signal_response(row) for row in rows],
     )
 
 

@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.schemas.api_company import PageResponse
 from app.schemas.company import SignalType
@@ -31,3 +31,22 @@ class InvestigationSignalResponse(BaseModel):
 
 class InvestigationSignalPage(PageResponse[InvestigationSignalResponse]):
     """Paginated investigation signal response."""
+
+
+class AnomalyRecomputeRequest(BaseModel):
+    """Company whose persisted investigation signals should be refreshed."""
+
+    ticker: str = Field(
+        min_length=1,
+        max_length=10,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9.-]{0,9}$",
+    )
+
+
+class AnomalyRecomputeResponse(BaseModel):
+    """Actual persisted results from one deterministic recomputation."""
+
+    cik: int
+    ticker: str
+    total: int
+    items: list[InvestigationSignalResponse]

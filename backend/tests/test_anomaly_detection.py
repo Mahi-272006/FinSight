@@ -130,6 +130,27 @@ class TestMarginCompressionStreak:
         # Decline then recovery: trailing streak at the end is 0.
         assert self._check({2021: 0.30, 2022: 0.28, 2023: 0.32}) == []
 
+    def test_missing_fiscal_year_breaks_consecutive_streak(self):
+        # The last three observations decline, but FY2022 is missing, so they
+        # are not three consecutive fiscal-year declines.
+        assert self._check(
+            {2020: 0.34, 2021: 0.32, 2023: 0.30, 2024: 0.28, 2025: 0.26}
+        ) == []
+
+    def test_margin_signal_preserves_year_accession(self):
+        signals = check_margin_compression_streak(
+            operating_margins_by_year={
+                2021: 0.30,
+                2022: 0.28,
+                2023: 0.26,
+                2024: 0.24,
+            },
+            cik=1,
+            ticker="TEST",
+            accessions_by_year={2024: ["0000000001-24-000001"]},
+        )
+        assert signals[0].source_accessions == ["0000000001-24-000001"]
+
     def test_silent_with_missing_years(self):
         assert self._check({}) == []
         assert self._check({2024: 0.30}) == []  # single point

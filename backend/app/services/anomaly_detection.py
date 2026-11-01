@@ -242,19 +242,23 @@ def check_margin_compression_streak(
     if len(years) < 2:
         return signals
 
-    # Build the year-ordered series once; streak logic walks it backwards.
-    series = [operating_margins_by_year[y] for y in years]
-
     for idx, year in enumerate(years):
-        # Trailing up to and INCLUDING this year.
-        sub_series = series[: idx + 1]
+        # A missing fiscal year breaks a consecutive streak. Restrict each
+        # calculation to the contiguous run ending in this fiscal year.
+        start_idx = idx
+        while start_idx > 0 and years[start_idx] == years[start_idx - 1] + 1:
+            start_idx -= 1
+        sub_series = [
+            operating_margins_by_year[point_year]
+            for point_year in years[start_idx : idx + 1]
+        ]
         streak = trailing_streak(sub_series, "down")
         # streak == k declines means k+1 consecutive declining periods ending
         # this year; we require >= MARGIN_STREAK_ELEVATED declines.
         if streak < MARGIN_STREAK_ELEVATED:
             continue
         severity: Severity = "high" if streak >= MARGIN_STREAK_HIGH else "elevated"
-        start_year = year - streak
+        start_year = years[idx - streak]
         first = operating_margins_by_year.get(start_year)
         last = operating_margins_by_year[year]
         signals.append(

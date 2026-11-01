@@ -61,6 +61,10 @@ def detect_signals(series: CompanySeries) -> list[InvestigationSignal]:
         | set(series.years_with("operating_income_margin"))
         | set(series.years_with("net_income_growth_yoy"))
         | set(series.years_with("operating_cash_flow_growth_yoy"))
+        | set(series.years_with("earnings_cashflow_divergence"))
+        | set(series.years_with("accounts_receivable_growth_yoy"))
+        | set(series.years_with("accounts_receivable"))
+        | set(series.years_with("revenue"))
     )
 
     for fy in all_years:
@@ -122,6 +126,9 @@ def detect_signals(series: CompanySeries) -> list[InvestigationSignal]:
             operating_margins_by_year=margin_series,
             cik=series.cik,
             ticker=series.ticker,
+            accessions_by_year=(series.accessions or {}).get(
+                "operating_income_margin", {}
+            ),
         )
     )
 

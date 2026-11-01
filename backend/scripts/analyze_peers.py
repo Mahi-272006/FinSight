@@ -18,7 +18,6 @@ The report distinguishes evidence layers explicitly:
                           NEVER a verdict of wrongdoing
 """
 
-import json
 import sys
 from pathlib import Path
 
@@ -29,45 +28,14 @@ from sqlalchemy import select
 from app.database.models import Company, FinancialMetric
 from app.database.postgres import session_scope
 from app.database.repositories import SignalRepository
-from app.services.anomaly_orchestrator import CompanySeries, detect_signals
+from app.services.anomaly_orchestrator import detect_signals
+from app.services.anomaly_service import load_company_series as load_series
 from app.services.peer_comparison import (
     REPORT_METRICS,
     CompanyMetricPoint,
     compare_all_periods,
 )
 from app.utils.logging import configure_logging
-
-
-def load_series(session, company: Company) -> CompanySeries:
-    """Assemble one company's annual metric time series from FinancialMetric.
-
-    Only FY/annual rows feed the rules (quarterly signals need separate
-    seasonality handling -- out of M3 scope, documented).
-    """
-    rows = session.execute(
-        select(FinancialMetric).where(FinancialMetric.cik == company.cik)
-    ).scalars()
-
-    annual: dict[str, dict[int, float]] = {}
-    accessions: dict[str, dict[int, list[str]]] = {}
-
-    for r in rows:
-        if r.fiscal_period != "FY" or r.period_type != "annual":
-            continue
-        if r.value is None:
-            continue
-        annual.setdefault(r.metric, {})[r.fiscal_year] = r.value
-        try:
-            accs = json.loads(r.source_accessions_json or "[]")
-        except ValueError:
-            accs = []
-        if accs:
-            accessions.setdefault(r.metric, {})[r.fiscal_year] = accs
-
-    return CompanySeries(
-        cik=company.cik, ticker=company.ticker,
-        annual_metrics=annual, accessions=accessions,
-    )
 
 
 def load_comparison_points(session, companies: list[Company]) -> list[CompanyMetricPoint]:

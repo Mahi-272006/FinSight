@@ -1879,4 +1879,76 @@ Executed in the project virtual environment:
   transaction that was rolled back. PostgreSQL downgrade/re-upgrade operations
   also passed inside a rollback-only transaction, with both new tables empty.
 
-Stage 8 anomaly recomputation has not started.
+### M9 Stage 8 — Anomaly recomputation
+
+**Status:** ✅ IMPLEMENTED; awaiting final M9 review
+**Date:** 2026-11-01
+
+#### What was built
+
+- Moved annual calculated-metric series loading into
+  `backend/app/services/anomaly_service.py`. The analysis script imports that
+  same loader, so script and API do not maintain separate implementations.
+  Only finite FY/annual values enter detector rules; accession lists are
+  carried forward from stored metric provenance.
+- Added `POST /api/v1/anomalies/recompute`. It accepts a ticker, restricts
+  recomputation to MSFT, AAPL, and NVDA, distinguishes an unsupported ticker,
+  a supported company absent from the database, and insufficient annual rule
+  inputs, and returns the actual persisted signals.
+- `AnomalyService` owns a short-lived database session and transaction. It
+  executes the existing deterministic detector and uses
+  `SignalRepository.replace_company_signals` to atomically refresh a
+  company's current signals. Commit happens before the response is built;
+  failures roll back and map to static HTTP messages. It creates no signals
+  when rules do not fire and clears stale signals only after valid inputs have
+  been evaluated successfully.
+- Expanded orchestrator year coverage to include every metric used by the
+  detector and passed operating-margin accession provenance into the margin
+  rule. Corrected margin streak evaluation so a missing fiscal year breaks a
+  “consecutive years” run instead of joining observations across a gap.
+  Signals remain analyst investigation prompts, not fraud probabilities or
+  investment verdicts.
+- Added request/response schemas, an injected/app-cached service dependency,
+  and tests for real recomputation and persistence, input/data errors,
+  dependency injection, static error sanitization, rollback after a simulated
+  persistence failure, series-loader behavior, script/service reuse, margin
+  year gaps, and provenance.
+- No database migration was required; the existing investigation-signals
+  table, unique key, evidence columns, and repository full-refresh operation
+  are reused.
+
+#### Stage 8 and final M9 verification
+
+Executed in the project virtual environment:
+
+- Focused anomaly API, service, detector, and existing anomaly regression:
+  **59 passed** (5 existing Starlette deprecation warnings).
+- Complete backend regression: **545 passed in 20.28s** (20 existing
+  Starlette deprecation warnings).
+- SQLite migration-chain test: **2 passed**. The existing migration test
+  upgrades from the pre-Stage-7 revision through head, verifies prior company
+  data survives, downgrades to the prior revision, and re-upgrades to head.
+- FastAPI smoke requests returned **200** for `/api/v1/health`, `/docs`,
+  `/redoc`, and `/openapi.json`.
+- PostgreSQL `alembic current` reported `e41f7c6a93d0`; `alembic check`
+  completed with “No new upgrade operations detected.” Read-only table-count
+  checks for companies, financial metrics, and investigation signals passed
+  inside a transaction that was rolled back. The actual anomaly service also
+  recomputed against PostgreSQL data inside an outer savepoint-compatible
+  transaction; after rollback, the company's persisted signal count was
+  unchanged. No smoke-test records were left behind. No PostgreSQL migration
+  was required because the database was already at the expected head.
+- `git diff --check` passed. The evaluation API, requirements, and migration
+  history were not changed. The change set is limited to Stage 8 service/API,
+  shared loader/detector corrections, tests, and this log.
+
+#### Limitations and warnings
+
+- Recompute uses stored annual calculated metrics; it does not fetch or
+  recalculate SEC filings. Run the existing SEC ingestion and deterministic
+  financial-metric pipeline first when inputs are absent or stale.
+- Quarterly/YTD series are intentionally excluded because current detector
+  rules are annual.
+- The test suite reports 20 Starlette warnings for the existing deprecated
+  `HTTP_422_UNPROCESSABLE_ENTITY` constant in test assertions; no tests were
+  skipped or weakened.

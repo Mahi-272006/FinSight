@@ -301,6 +301,20 @@ class SignalRepository:
         self._session.execute(delete(InvestigationSignal).where(InvestigationSignal.cik == cik))
         return self.upsert_signals(signals)
 
+    def get_signals_for_company(self, cik: int) -> list[InvestigationSignal]:
+        """Return a company's current signals in stable display order."""
+        stmt = (
+            select(InvestigationSignal)
+            .where(InvestigationSignal.cik == cik)
+            .order_by(
+                InvestigationSignal.fiscal_year,
+                InvestigationSignal.signal_type,
+                InvestigationSignal.fiscal_period,
+                InvestigationSignal.id,
+            )
+        )
+        return list(self._session.execute(stmt).scalars())
+
     def get_signals(
         self, cik: int | None = None, signal_type: str | None = None
     ) -> list[InvestigationSignal]:

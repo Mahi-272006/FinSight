@@ -6,6 +6,7 @@ from fastapi import HTTPException, Request
 
 from app.database.postgres import get_session_factory
 from app.graph.agent import ResearchAgent
+from app.services.anomaly_service import AnomalyService
 from app.services.embeddings import Embedder
 from app.services.llm_manager import LLMManager
 from app.services.report_service import ReportService
@@ -86,6 +87,21 @@ def get_embedder(request: Request) -> Embedder:
 def get_manager(request: Request) -> LLMManager:
     """Get the injected LLM manager; never builds provider clients here."""
     return cast(LLMManager, _require_component(request, "manager"))
+
+
+def get_anomaly_service(request: Request) -> AnomalyService:
+    """Get an injected or app-cached service owning recompute transactions."""
+    components = request.app.state.components
+    service = components.get("anomaly_service")
+    if service is None:
+        service = getattr(request.app.state, "anomaly_service", None)
+    if service is None:
+        session_factory = components.get("session_factory")
+        if session_factory is None:
+            session_factory = get_session_factory()
+        service = AnomalyService(session_factory=session_factory)
+        request.app.state.anomaly_service = service
+    return cast(AnomalyService, service)
 
 
 def get_thesis_service(request: Request) -> ThesisService:
