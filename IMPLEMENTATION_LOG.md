@@ -1536,3 +1536,53 @@ LLM they are never verdicts, and the status stays what the numbers say.
 The end-to-end test pins it: every condition met plus elevated AND
 high-severity signals → status still Supported, signals still attached.
 Useful and honest, without conflating "worth reviewing" with "contradicted".
+
+---
+
+## M9 Stage 1 — FastAPI application foundation
+
+**Status:** ✅ STAGE 1 COMPLETE; Stage 2 is not started
+**Date:** 2026-11-01
+
+### What was built
+
+- Added `create_app()` and a module-level ASGI `app` in
+  `backend/app/main.py`. The factory configures lifespan startup/shutdown,
+  CORS, middleware, exception handlers, and versioned API routing.
+- Added an optional `components` mapping stored on `app.state.components` so
+  later API routes can receive prebuilt services without module-level service
+  singletons.
+- Added configurable `CORS_ORIGINS` with defaults for both Vite development
+  origins (`localhost:5173` and `127.0.0.1:5173`), credentials disabled, and
+  comma-separated origin parsing in `Settings`.
+- Added `GET /api/v1/health`, returning status, application version, and
+  environment without contacting downstream services.
+- Added per-request IDs, response `X-Request-ID` headers, and method/path/
+  status/duration logging.
+- Added centralized mappings for thesis not-found (404), thesis input (400),
+  LLM configuration/provider failures (sanitized 503), and unexpected errors
+  (sanitized 500). Diagnostic exceptions are logged server-side; error
+  responses do not include exception details or tracebacks.
+- Corrected the unhandled-error middleware boundary: Starlette's
+  `ServerErrorMiddleware` wraps user middleware, so a generic exception can
+  escape `call_next()` before the logging middleware sees the generated 500.
+  The middleware now logs the failed request before re-raising, and the outer
+  sanitized handler returns the same request ID in `X-Request-ID`.
+- Added synchronous TestClient and settings-cache fixtures. Added Stage 1
+  tests for health responses, request IDs, CORS, exception mappings and
+  sanitization, factory isolation/component injection, and unhandled-error
+  response/log correlation.
+- Added `httpx2` to backend requirements for the installed Starlette
+  TestClient implementation.
+
+### Verification
+
+Freshly executed by the user in Windows PowerShell:
+
+- Focused unhandled-exception tests: **4 passed, 25 deselected**.
+- Full backend regression suite: **439 passed in 35.38s** (previous verified
+  baseline: 438 passed).
+
+### Scope remaining
+
+M9 Stage 1 is verified. M9 Stage 2 has not started. M8 remains postponed.

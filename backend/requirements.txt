@@ -18,8 +18,9 @@ sqlalchemy>=2.0,<3.0
 alembic>=1.13,<2.0
 psycopg[binary]>=3.2,<4.0          # PostgreSQL driver (psycopg3)
 
-# --- HTTP client (SEC EDGAR) ---
+# --- HTTP client (SEC EDGAR + testing) ---
 httpx>=0.27,<1.0
+httpx2>=2.14,<3.0                 # required by Starlette >=1.2 TestClient
 
 # --- LLM agent stack ---
 langgraph>=0.4,<1.0

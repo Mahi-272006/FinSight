@@ -22,6 +22,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # backend/ root directory (this file lives at backend/app/config.py)
 BACKEND_ROOT = Path(__file__).resolve().parent.parent
 
+# Reported by /health and the OpenAPI document so clients can tell which build
+# they are talking to. Pre-1.0 while milestones still land; bump on close.
+APP_VERSION = "0.9.0"
+
 
 class Settings(BaseSettings):
     """Typed application settings, sourced from environment variables / .env."""
@@ -35,6 +39,11 @@ class Settings(BaseSettings):
     # --- Application ---
     app_env: str = "development"
     log_level: str = "INFO"
+    # M9: browser origins allowed by CORS, comma-separated. The Vite dev
+    # server is reached as BOTH http://localhost:5173 and
+    # http://127.0.0.1:5173 -- to a browser those are different origins --
+    # so both spellings are allowed by default.
+    cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
 
     # --- SEC EDGAR (no API key; identification + rate limits required) ---
     sec_user_agent: str = Field(
@@ -141,6 +150,18 @@ class Settings(BaseSettings):
         if not value.is_absolute():
             value = BACKEND_ROOT / value
         return value
+
+    @property
+    def cors_origins_list(self) -> list[str]:
+        """Parse cors_origins into a clean list (whitespace/empties dropped).
+
+        pydantic-settings keeps env values as typed fields; consumers (the
+        CORS middleware) need a list. Dropping empty segments means a stray
+        comma can't smuggle an unusable "" origin, and an empty setting yields
+        [] (allow nothing) instead of [""], making the fail-safe behavior
+        explicit.
+        """
+        return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
 
     def ensure_directories(self) -> None:
         """Create data/log directories if missing (idempotent)."""
