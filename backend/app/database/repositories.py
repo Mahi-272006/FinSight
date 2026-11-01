@@ -15,7 +15,7 @@ silently corrupt every growth calculation (duplicated periods).
 import json
 from datetime import date, datetime
 
-from sqlalchemy import delete, select
+from sqlalchemy import case, delete, func, select
 from sqlalchemy.orm import Session
 
 from app.database.models import (
@@ -54,6 +54,18 @@ class CompanyRepository:
 
     def list_all(self) -> list[Company]:
         return list(self._session.execute(select(Company).order_by(Company.ticker)).scalars())
+
+    def count_all(self) -> int:
+        return self._session.execute(select(func.count()).select_from(Company)).scalar_one()
+
+    def list_page(self, limit: int, offset: int = 0) -> list[Company]:
+        stmt = (
+            select(Company)
+            .order_by(Company.ticker, Company.cik)
+            .offset(offset)
+            .limit(limit)
+        )
+        return list(self._session.execute(stmt).scalars())
 
 
 class FactRepository:
@@ -110,6 +122,44 @@ class FactRepository:
         if period_type:
             stmt = stmt.where(FinancialFact.period_type == period_type)
         stmt = stmt.order_by(FinancialFact.fiscal_year, FinancialFact.fiscal_period)
+        return list(self._session.execute(stmt).scalars())
+
+    def count_facts(
+        self,
+        cik: int,
+        metric: str | None = None,
+        period_type: str | None = None,
+    ) -> int:
+        stmt = select(func.count()).select_from(FinancialFact).where(
+            FinancialFact.cik == cik
+        )
+        if metric:
+            stmt = stmt.where(FinancialFact.metric == metric)
+        if period_type:
+            stmt = stmt.where(FinancialFact.period_type == period_type)
+        return self._session.execute(stmt).scalar_one()
+
+    def get_facts_page(
+        self,
+        cik: int,
+        limit: int,
+        offset: int = 0,
+        metric: str | None = None,
+        period_type: str | None = None,
+    ) -> list[FinancialFact]:
+        stmt = select(FinancialFact).where(FinancialFact.cik == cik)
+        if metric:
+            stmt = stmt.where(FinancialFact.metric == metric)
+        if period_type:
+            stmt = stmt.where(FinancialFact.period_type == period_type)
+        stmt = stmt.order_by(
+            FinancialFact.metric,
+            FinancialFact.fiscal_year,
+            FinancialFact.fiscal_period,
+            FinancialFact.filed_at,
+            FinancialFact.id,
+        )
+        stmt = stmt.offset(offset).limit(limit)
         return list(self._session.execute(stmt).scalars())
 
 
@@ -170,6 +220,37 @@ class MetricRepository:
         if metric:
             stmt = stmt.where(FinancialMetric.metric == metric)
         stmt = stmt.order_by(FinancialMetric.fiscal_year, FinancialMetric.fiscal_period)
+        return list(self._session.execute(stmt).scalars())
+
+    def count_metrics(self, cik: int, metric: str | None = None) -> int:
+        stmt = select(func.count()).select_from(FinancialMetric).where(
+            FinancialMetric.cik == cik
+        )
+        if metric:
+            stmt = stmt.where(FinancialMetric.metric == metric)
+        return self._session.execute(stmt).scalar_one()
+
+    def get_metrics_page(
+        self, cik: int, limit: int, offset: int = 0, metric: str | None = None
+    ) -> list[FinancialMetric]:
+        stmt = select(FinancialMetric).where(FinancialMetric.cik == cik)
+        if metric:
+            stmt = stmt.where(FinancialMetric.metric == metric)
+        period_order = case(
+            (FinancialMetric.fiscal_period == "Q1", 1),
+            (FinancialMetric.fiscal_period == "Q2", 2),
+            (FinancialMetric.fiscal_period == "Q3", 3),
+            (FinancialMetric.fiscal_period == "Q4", 4),
+            (FinancialMetric.fiscal_period == "FY", 5),
+            else_=6,
+        )
+        stmt = stmt.order_by(
+            FinancialMetric.metric,
+            FinancialMetric.fiscal_year,
+            period_order,
+            FinancialMetric.id,
+        )
+        stmt = stmt.offset(offset).limit(limit)
         return list(self._session.execute(stmt).scalars())
 
 

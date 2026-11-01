@@ -28,6 +28,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.api.health import router as health_router
+from app.api.companies import router as companies_router
 from app.config import APP_VERSION, get_settings
 from app.services.llm_providers import LLMAllProvidersFailed, LLMConfigurationError
 from app.services.thesis_service import ThesisInputError, ThesisNotFoundError
@@ -267,9 +268,9 @@ def create_app(components: dict[str, Any] | None = None) -> FastAPI:
     API_PREFIX = "/api/v1"
 
     app.include_router(health_router, prefix=API_PREFIX)
-    # Stage 2 additions (not yet implemented):
+    app.include_router(companies_router, prefix=API_PREFIX)
+    # Later M9 stages:
     # app.include_router(thesis_router,    prefix=API_PREFIX)
-    # app.include_router(companies_router, prefix=API_PREFIX)
     # app.include_router(research_router,  prefix=API_PREFIX)
     # app.include_router(reports_router,   prefix=API_PREFIX)
 

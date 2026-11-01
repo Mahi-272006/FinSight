@@ -68,6 +68,24 @@ class Metric(str, Enum):
     SHARES_OUTSTANDING = "shares_outstanding"
 
 
+class CalculatedMetricName(str, Enum):
+    """Names emitted by ``calculate_all_metrics`` and stored in the DB."""
+
+    REVENUE_GROWTH_YOY = "revenue_growth_yoy"
+    OPERATING_INCOME_GROWTH_YOY = "operating_income_growth_yoy"
+    NET_INCOME_GROWTH_YOY = "net_income_growth_yoy"
+    OPERATING_CASH_FLOW_GROWTH_YOY = "operating_cash_flow_growth_yoy"
+    GROSS_PROFIT_MARGIN = "gross_profit_margin"
+    OPERATING_INCOME_MARGIN = "operating_income_margin"
+    NET_INCOME_MARGIN = "net_income_margin"
+    RETURN_ON_ASSETS = "return_on_assets"
+    DEBT_TO_ASSETS = "debt_to_assets"
+    FREE_CASH_FLOW = "free_cash_flow"
+    EARNINGS_CASHFLOW_DIVERGENCE = "earnings_cashflow_divergence"
+    CURRENT_RATIO = "current_ratio"
+    ACCOUNTS_RECEIVABLE_GROWTH_YOY = "accounts_receivable_growth_yoy"
+
+
 class FactUnit(str, Enum):
     """Units we accept; anything else is rejected loudly (never guessed)."""
 

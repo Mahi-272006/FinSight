@@ -1654,4 +1654,42 @@ Executed in the project virtual environment:
   `tests/test_postgres_dependency.py` — **38 passed**.
 - Full regression: **448 passed in 7.87s**.
 
-Stage 3 has not started. Checkpoint 1 is ready for review.
+### M9 Stage 3 — Companies API
+
+**Status:** ✅ IMPLEMENTED; awaiting Checkpoint 1.5 review
+**Date:** 2026-11-01
+
+#### What was built
+
+- Mounted the Companies router under `/api/v1` while preserving the application
+  factory and injected component state.
+- Added paginated company listing and company detail endpoints backed by
+  `CompanyRepository`. Tickers are validated and looked up case-insensitively.
+- Added paginated stored calculated-metric and SEC fact endpoints, plus
+  paginated chronological metric history. Metric and period filters are
+  validated against the existing domain enums and calculated-metric names
+  emitted by the existing financial engine.
+- Extended the existing repositories with count and page queries. Route
+  handlers use the request-scoped `Depends(get_session)` session and do not
+  calculate or synthesize financial values.
+- Added response schemas that preserve stored metric formula/input/accession
+  provenance and fact filing/restatement provenance. Missing companies return
+  404; a supported but explicitly filtered metric/fact with no matching rows
+  returns 404. Unfiltered empty collections return an empty page.
+- Added API tests using the shared SQLite `StaticPool` fixture and a scoped
+  `get_session` override; no live research, ML, vector, or LLM component is
+  constructed.
+- Added explicit valid and invalid period-filter coverage, including a check
+  that the filtered count matches the returned fact rows.
+
+#### Verification
+
+Executed in the project virtual environment:
+
+- Focused Companies API tests: **20 passed**.
+- Companies API and related database/API regression tests: **69 passed**
+  before the additional period-filter tests.
+- Full backend regression after the review update: **468 passed in 8.65s**.
+- `git diff --check`: clean.
+
+Stage 4 (Anomalies API) has not started.
