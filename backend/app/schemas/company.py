@@ -68,6 +68,15 @@ class Metric(str, Enum):
     SHARES_OUTSTANDING = "shares_outstanding"
 
 
+class SignalType(str, Enum):
+    """Stable signal identifiers shared by detection and API validation."""
+
+    EARNINGS_CASHFLOW_DIVERGENCE = "earnings_cashflow_divergence"
+    RECEIVABLES_OUTPACING_REVENUE = "receivables_outpacing_revenue"
+    MARGIN_COMPRESSION_STREAK = "margin_compression_streak"
+    GROWTH_DECELERATION = "growth_deceleration"
+
+
 class CalculatedMetricName(str, Enum):
     """Names emitted by ``calculate_all_metrics`` and stored in the DB."""
 

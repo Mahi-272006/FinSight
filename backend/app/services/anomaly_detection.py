@@ -30,7 +30,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Literal
 
-from app.schemas.company import FiscalPeriod, Metric, PeriodType
+from app.schemas.company import FiscalPeriod, Metric, PeriodType, SignalType
 from app.services.trend import trailing_streak
 
 Severity = Literal["elevated", "high"]
@@ -111,7 +111,7 @@ def check_earnings_cashflow_divergence(
     return InvestigationSignal(
         cik=cik,
         ticker=ticker,
-        signal_type="earnings_cashflow_divergence",
+        signal_type=SignalType.EARNINGS_CASHFLOW_DIVERGENCE.value,
         severity=severity,
         fiscal_year=fiscal_year,
         fiscal_period=fiscal_period,
@@ -181,7 +181,7 @@ def check_receivables_outpacing_revenue(
     return InvestigationSignal(
         cik=cik,
         ticker=ticker,
-        signal_type="receivables_outpacing_revenue",
+        signal_type=SignalType.RECEIVABLES_OUTPACING_REVENUE.value,
         severity=severity,
         fiscal_year=fiscal_year,
         fiscal_period=fiscal_period,
@@ -261,7 +261,7 @@ def check_margin_compression_streak(
             InvestigationSignal(
                 cik=cik,
                 ticker=ticker,
-                signal_type="margin_compression_streak",
+                signal_type=SignalType.MARGIN_COMPRESSION_STREAK.value,
                 severity=severity,
                 fiscal_year=year,
                 fiscal_period=fiscal_period,
@@ -337,7 +337,7 @@ def check_growth_deceleration(
     return InvestigationSignal(
         cik=cik,
         ticker=ticker,
-        signal_type="growth_deceleration",
+        signal_type=SignalType.GROWTH_DECELERATION.value,
         severity=severity,
         fiscal_year=fiscal_year,
         fiscal_period=fiscal_period,

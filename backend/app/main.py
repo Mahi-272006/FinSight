@@ -29,6 +29,7 @@ from fastapi.responses import JSONResponse
 
 from app.api.health import router as health_router
 from app.api.companies import router as companies_router
+from app.api.anomalies import router as anomalies_router
 from app.config import APP_VERSION, get_settings
 from app.services.llm_providers import LLMAllProvidersFailed, LLMConfigurationError
 from app.services.thesis_service import ThesisInputError, ThesisNotFoundError
@@ -269,6 +270,7 @@ def create_app(components: dict[str, Any] | None = None) -> FastAPI:
 
     app.include_router(health_router, prefix=API_PREFIX)
     app.include_router(companies_router, prefix=API_PREFIX)
+    app.include_router(anomalies_router, prefix=API_PREFIX)
     # Later M9 stages:
     # app.include_router(thesis_router,    prefix=API_PREFIX)
     # app.include_router(research_router,  prefix=API_PREFIX)

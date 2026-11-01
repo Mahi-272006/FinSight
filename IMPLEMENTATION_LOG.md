@@ -1692,4 +1692,49 @@ Executed in the project virtual environment:
 - Full backend regression after the review update: **468 passed in 8.65s**.
 - `git diff --check`: clean.
 
-Stage 4 (Anomalies API) has not started.
+Stage 3 was committed as `adcf95a80ba9266d4fab15252859a973f99534c6`
+(`M9 Stage 3: Companies API`).
+
+### M9 Stage 4 — Anomalies API
+
+**Status:** ✅ IMPLEMENTED; awaiting Checkpoint 2 review
+**Date:** 2026-11-01
+
+#### What was built
+
+- Added `GET /api/v1/anomalies/{ticker}` to retrieve already-persisted
+  investigation signals for a company. This endpoint is read-only and does
+  not invoke the detector or recompute signals.
+- Added an optional validated `signal_type` filter and limit/offset
+  pagination. Signal identifiers are defined once in the shared domain schema
+  and used by both the detector and API validation, preventing the filter
+  list from drifting away from the emitted types.
+- Extended `SignalRepository` with filtered count and stable page queries;
+  counts and rows use the same company/type filters. Existing repository
+  methods remain available to preserve current callers.
+- Added response schemas exposing the stored signal identity, severity,
+  fiscal period, detector headline/explanation, complete evidence values and
+  thresholds, source accession numbers, and detection timestamp.
+- Empty optional evidence/accession JSON is serialized as an empty object/list;
+  valid stored values are returned unchanged. Response `signal_type` remains a
+  string because the persisted model allows future types; the query filter is
+  constrained to the detector's current shared enum.
+- The route uses the existing company repository and request-scoped
+  `Depends(get_session)` session. Tests use the API SQLite `StaticPool`
+  fixture and scoped session override; no research, ML, vector-store, or LLM
+  components are initialized.
+- Missing companies return 404, syntactically invalid tickers and unsupported
+  signal types return 422, explicitly filtered supported types with no rows
+  return 404, and an unfiltered company with no signals returns an empty page.
+
+#### Verification
+
+Executed in the project virtual environment:
+
+- Focused Anomalies API tests: **13 passed**.
+- Anomaly, repository, and related API regressions after review fixes:
+  **109 passed**.
+- Full backend regression after review fixes: **481 passed in 9.22s**.
+
+Anomaly recomputation remains Stage 8 and has not started. Stage 5 and later
+stages remain unstarted.

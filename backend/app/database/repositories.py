@@ -311,3 +311,31 @@ class SignalRepository:
             InvestigationSignal.fiscal_year.desc(), InvestigationSignal.severity
         )
         return list(self._session.execute(stmt).scalars())
+
+    def count_signals(self, cik: int, signal_type: str | None = None) -> int:
+        stmt = select(func.count()).select_from(InvestigationSignal).where(
+            InvestigationSignal.cik == cik
+        )
+        if signal_type:
+            stmt = stmt.where(InvestigationSignal.signal_type == signal_type)
+        return self._session.execute(stmt).scalar_one()
+
+    def get_signals_page(
+        self,
+        cik: int,
+        limit: int,
+        offset: int = 0,
+        signal_type: str | None = None,
+    ) -> list[InvestigationSignal]:
+        stmt = select(InvestigationSignal).where(InvestigationSignal.cik == cik)
+        if signal_type:
+            stmt = stmt.where(InvestigationSignal.signal_type == signal_type)
+        stmt = stmt.order_by(
+            InvestigationSignal.fiscal_year.desc(),
+            InvestigationSignal.severity,
+            InvestigationSignal.signal_type,
+            InvestigationSignal.fiscal_period,
+            InvestigationSignal.id,
+        )
+        stmt = stmt.offset(offset).limit(limit)
+        return list(self._session.execute(stmt).scalars())
