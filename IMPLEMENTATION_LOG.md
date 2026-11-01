@@ -1366,8 +1366,8 @@ two strictly separated layers, keeping an append-only history.
   which is the invariant proving itself).
 - **The service owns its transaction:** `create_thesis`/`assess` commit
   internally, so behavior is identical under production's
-  `get_session()` (double commit is a no-op) and a bare test
-  `sessionmaker` (which would otherwise close without committing).
+  `get_session_factory()` and a bare test `sessionmaker`; both close without
+  auto-committing, while the service explicitly commits its own transaction.
 - **No arithmetic anywhere:** conditions compare thresholds against values
   the M2 engine already computed; growth/margin formulas exist only in
   the engine, only with source accessions.
@@ -1586,3 +1586,34 @@ Freshly executed by the user in Windows PowerShell:
 ### Scope remaining
 
 M9 Stage 1 is verified. M9 Stage 2 has not started. M8 remains postponed.
+
+---
+
+## M9 Stage 2, Step 1 — Database session dependency correction
+
+**Status:** ✅ STEP 1 VERIFIED; Steps 2 and 3 are not started
+**Date:** 2026-11-01
+
+### What changed
+
+- Converted `get_session()` into a genuine generator dependency for FastAPI.
+  It yields one SQLAlchemy `Session`, commits after normal completion, rolls
+  back if the request raises an exception, and always closes the session.
+- Added `get_session_factory()` to return the cached `sessionmaker`, creating
+  the existing PostgreSQL engine lazily when needed. Services such as
+  `ThesisService` use this factory and continue to own their write commits.
+- Added `session_scope()` as a context-manager wrapper for scripts and CLIs.
+  Updated the three existing script call sites to use it, preserving their
+  commit-on-success, rollback-on-error, and close behavior.
+- Added focused lifecycle, lazy factory, compatibility, and ThesisService
+  transaction tests using an isolated SQLite database.
+
+### Verification
+
+Freshly executed by the user in Windows PowerShell:
+
+- `tests/test_postgres_dependency.py`: **5 passed**.
+- Full backend regression suite: **444 passed in 10.04s** (previous verified
+  baseline: 439 passed).
+
+M9 Stage 2, Steps 2 and 3 remain unstarted.

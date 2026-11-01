@@ -49,19 +49,13 @@ def get_engine() -> Engine:
     return _engine
 
 
-@contextmanager
 def get_session() -> Iterator[Session]:
-    """Yield a Session; commit on success, rollback on error, always close.
+    """FastAPI dependency: yield a Session; commit/rollback, then always close.
 
-    Usage:
-        with get_session() as session:
-            session.add(obj)
-            # committed automatically here; rolled back if an exception raised
+    This must remain a generator function so FastAPI can manage the session
+    lifecycle when used as ``Depends(get_session)``.
     """
-    if _session_factory is None:
-        get_engine()
-    assert _session_factory is not None
-    session = _session_factory()
+    session = get_session_factory()()
     try:
         yield session
         session.commit()
@@ -70,6 +64,26 @@ def get_session() -> Iterator[Session]:
         raise
     finally:
         session.close()
+
+
+@contextmanager
+def session_scope() -> Iterator[Session]:
+    """Context-manager form of the session lifecycle for scripts and CLIs."""
+    yield from get_session()
+
+
+def get_session_factory() -> sessionmaker[Session]:
+    """Return the lazily initialized sessionmaker for transaction-owning services.
+
+    Services such as ``ThesisService`` open their own sessions and explicitly
+    commit their write transactions, so they need the factory rather than the
+    request-scoped FastAPI dependency.
+    """
+    global _session_factory
+    if _session_factory is None:
+        get_engine()
+    assert _session_factory is not None
+    return _session_factory
 
 
 def create_tables() -> None:

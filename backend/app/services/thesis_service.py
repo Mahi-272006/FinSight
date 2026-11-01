@@ -415,8 +415,8 @@ class ThesisService:
             session.flush()
             thesis_id = thesis.id
             # Own the transaction boundary: works whether the factory is
-            # production's get_session (double commit is a no-op) or a bare
-            # sessionmaker in tests (which would NOT commit on close).
+            # production's get_session_factory() or a bare sessionmaker in
+            # tests; either way this service owns and commits the transaction.
             session.commit()
         logger.info(
             "Thesis %s created for %s with %d condition(s)", thesis_id, ticker, len(specs)

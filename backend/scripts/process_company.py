@@ -23,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import json
 
 from app.config import get_settings
-from app.database.postgres import create_tables, get_session
+from app.database.postgres import create_tables, session_scope
 from app.database.repositories import CompanyRepository, FactRepository, MetricRepository
 from app.ingestion.company_facts import fetch_and_save
 from app.ingestion.data_cleaner import normalize_company_facts
@@ -40,7 +40,7 @@ def main(queries: list[str]) -> int:
     create_tables()
 
     failures = 0
-    with SECClient(settings) as client, get_session() as session:
+    with SECClient(settings) as client, session_scope() as session:
         companies = CompanyRepository(session)
         facts_repo = FactRepository(session)
         metrics_repo = MetricRepository(session)

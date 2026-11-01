@@ -27,7 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from sqlalchemy import select
 
 from app.database.models import Company, FinancialMetric
-from app.database.postgres import get_session
+from app.database.postgres import session_scope
 from app.database.repositories import SignalRepository
 from app.services.anomaly_orchestrator import CompanySeries, detect_signals
 from app.services.peer_comparison import (
@@ -103,7 +103,7 @@ def load_comparison_points(session, companies: list[Company]) -> list[CompanyMet
 
 def main() -> int:
     configure_logging("WARNING")
-    with get_session() as session:
+    with session_scope() as session:
         companies = list(session.execute(
             select(Company).order_by(Company.ticker)
         ).scalars())

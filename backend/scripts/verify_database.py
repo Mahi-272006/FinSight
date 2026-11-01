@@ -14,13 +14,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from sqlalchemy import func, select
 
 from app.database.models import Company, FinancialFact, FinancialMetric
-from app.database.postgres import get_session
+from app.database.postgres import session_scope
 from app.utils.logging import configure_logging
 
 
 def main() -> int:
     configure_logging("WARNING")
-    with get_session() as session:
+    with session_scope() as session:
         n_companies = session.execute(select(func.count()).select_from(Company)).scalar()
         n_facts = session.execute(select(func.count()).select_from(FinancialFact)).scalar()
         n_metrics = session.execute(select(func.count()).select_from(FinancialMetric)).scalar()
