@@ -1952,3 +1952,76 @@ Executed in the project virtual environment:
 - The test suite reports 20 Starlette warnings for the existing deprecated
   `HTTP_422_UNPROCESSABLE_ENTITY` constant in test assertions; no tests were
   skipped or weakened.
+
+## M10 — Frontend foundation and editorial design system
+
+**Status:** ✅ FOUNDATION IMPLEMENTED; awaiting review
+**Date:** 2026-11-01
+
+### What was built
+
+- Replaced the Vite starter screen with a JavaScript React application using
+  React Router. The seven routes are Overview, Companies, Anomalies,
+  Investment Thesis, AI Research, Reports, and Watchlist.
+- Added a persistent editorial-style sidebar, responsive application header,
+  mobile navigation drawer, reusable panels, buttons, tables, and loading,
+  empty, and error states. The design uses the approved warm-light palette,
+  serif display headings, readable sans-serif UI type, restrained borders,
+  and reduced-motion handling.
+- Added one Axios client configured through `VITE_API_BASE_URL` and documented
+  its local default in `frontend/.env.example`. Overview requests use the M9
+  companies, watchlist, reports, theses, and per-company anomalies endpoints.
+  The page shows API-backed totals and recent records and reports unavailable
+  sections when the API cannot be reached. Anomaly signals are labelled as
+  investigation indicators, not verdicts.
+- Added shared page-envelope and endpoint-record validation. Malformed success
+  responses now show an error state rather than being treated as empty data.
+  Overview requests receive an `AbortSignal`, are cancelled on cleanup, and
+  ignore cancelled or stale results. Client error messages are mapped from
+  status codes to static user-facing text instead of displaying backend detail.
+- Replaced the starter favicon with a monochrome FinSight letter mark. The
+  mobile navigation now moves focus into its links, traps keyboard tab focus,
+  closes on Escape, restores focus to its toggle, and remains scrollable on
+  short viewports.
+- Added Vitest, jsdom, and React Testing Library, plus focused tests for page
+  validation, empty and malformed responses, safe error mapping, cancellation,
+  Overview states, and mobile keyboard navigation.
+- The Overview company section displays company identity and fiscal calendar
+  information only. Financial metrics and facts will be considered during the
+  dedicated Companies page integration.
+- The remaining six routes are clearly marked foundation shells. This stage
+  does not claim that their page-level API integrations are complete. No fake
+  financial figures, reports, anomaly records, or activity were added.
+- Added Axios, React Router, Recharts, and Lucide React dependencies. Recharts
+  is available for later integration; this foundation has no aggregate
+  financial time-series endpoint to chart.
+
+### Verification
+
+- `npm run lint`: passed with no warnings after separating initial loading
+  from the explicit retry action.
+- `npm run build`: passed; Vite produced the production bundle.
+- `npm test`: **28 passed across 4 test files**.
+- Local Vite server responded successfully at `http://localhost:5173/`.
+- Browser verification after these corrections confirmed all seven routes
+  render their expected page headings. At a 390px viewport, the mobile drawer
+  opened, focused the Overview link, closed with Escape, restored focus to its
+  toggle, and rendered without horizontal overflow. Earlier foundation checks
+  also inspected desktop and 768px tablet layout.
+- The backend API was not running during browser inspection, so live sections
+  displayed the designed unavailable state. No backend records were assumed.
+- `git diff --check`: passed. `npm audit` after installing the test packages
+  reported zero vulnerabilities.
+
+### Limitations
+
+- Companies, Anomalies, Thesis, AI Research, Reports, and Watchlist have route
+  shells only; page-by-page API integration is deferred to the next M10 stage.
+- Overview activity currently means saved research reports because the API
+  does not expose a separate general activity feed. There is no portfolio or
+  market-price aggregate endpoint for additional financial KPIs.
+- Google Fonts are requested for Inter and Cormorant Garamond; system fallback
+  fonts are configured if that external request is unavailable.
+- Vitest 4.1.12 declares Node 20, 22, or 24+ support; the available Node 23.5.0
+  runtime is outside that declared engine range. The frontend test suite did
+  run successfully in this environment, but an LTS Node version is recommended.

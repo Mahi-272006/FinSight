@@ -1,16 +1,28 @@
-# React + Vite
+# FinSight frontend
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+FinSight's frontend foundation is a React and Vite application using JavaScript.
+It provides the shared editorial layout, navigation, design tokens, route shells,
+and a live-data Overview backed by the M9 API.
 
-Currently, two official plugins are available:
+## Run locally
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+1. Copy `.env.example` to `.env` and set `VITE_API_BASE_URL` if the backend is
+   not available at `http://localhost:8000/api/v1`.
+2. Install packages with `npm install`.
+3. Start the frontend with `npm run dev`.
 
-## React Compiler
+The backend must be running separately. The Overview uses live companies,
+watchlist entries, saved reports, thesis records, and persisted anomaly signals.
+An empty response is shown as empty, and unavailable data is reported without
+substituting sample financial values. The other six pages are foundation shells;
+their workflows are intentionally not connected in this stage.
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+## Checks
 
-## Expanding the Oxlint configuration
+- `npm run build` creates the production bundle in `dist/`.
+- `npm run lint` runs Oxlint.
+- `npm test` runs the frontend unit and component tests once.
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and Oxlint's TypeScript related rules in your project.
+The frontend reads the backend URL from `VITE_API_BASE_URL` in one Axios client.
+Vite exposes only `VITE_`-prefixed values to browser code; do not put credentials
+or private API keys in frontend environment variables.
