@@ -1617,3 +1617,41 @@ Freshly executed by the user in Windows PowerShell:
   baseline: 439 passed).
 
 M9 Stage 2, Steps 2 and 3 remain unstarted.
+
+### M9 Stage 2, Steps 2–3 — Component dependencies and API test harness
+
+**Status:** ✅ STAGE 2 COMPLETE; awaiting Checkpoint 1 review
+**Date:** 2026-11-01
+
+#### What was built
+
+- Added typed component accessors for the injected ResearchAgent, vector
+  store, embedder, and LLM manager. Accessors read only from
+  `request.app.state.components`; they do not construct live components.
+- Added a cached `get_thesis_service` accessor. It returns an injected service
+  when present or constructs one with the injected/lazily obtained
+  `sessionmaker` and optional manager, preserving ThesisService's independent
+  transaction ownership.
+- Added an API SQLite session-factory fixture using `StaticPool` and
+  `check_same_thread=False` so setup data is visible to TestClient worker
+  threads.
+- Added a scoped client factory accepting injected components, dependency
+  overrides, and optional test route configuration. It clears overrides in
+  `finally` and uses a context-managed TestClient; the existing `client`
+  fixture keeps its original interface.
+- Added API dependency tests for fake component identity, ThesisService
+  construction and caching, a real session shared across TestClient threads,
+  and dependency override use and cleanup. Tests inject fakes and do not
+  instantiate real ML, ChromaDB, or LLM components; a focused guard fails if
+  the API test path attempts to construct the real agent, store, embedder, or
+  manager.
+
+#### Verification
+
+Executed in the project virtual environment:
+
+- Focused: `tests/test_api_dependencies.py`, `tests/test_api_stage1.py`, and
+  `tests/test_postgres_dependency.py` — **38 passed**.
+- Full regression: **448 passed in 7.87s**.
+
+Stage 3 has not started. Checkpoint 1 is ready for review.

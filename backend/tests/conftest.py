@@ -1,7 +1,9 @@
 """Shared pytest fixtures for FinSight tests.
 
-Stage 1 additions (M9):
+M9 fixtures:
     client          -- FastAPI TestClient wrapping a fresh create_app() call.
+    client_factory  -- scoped TestClient with optional components/overrides.
+    api_session_factory -- per-test SQLite DB shared across TestClient threads.
     override_settings -- clears the lru_cache so monkeypatched env vars are
                          picked up by the next get_settings() call.
 
@@ -16,8 +18,12 @@ milestones land.
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
 
 from app.config import get_settings
+from app.database.models import Base
 from app.main import create_app
 
 
@@ -50,31 +56,48 @@ def override_settings():
 # ---------------------------------------------------------------------------
 
 @pytest.fixture()
-def client(override_settings):
-    """Return a TestClient wrapping a fresh FastAPI application.
+def api_session_factory():
+    """Return a per-test SQLite sessionmaker shared across TestClient threads."""
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine, expire_on_commit=False)
+    try:
+        yield factory
+    finally:
+        engine.dispose()
 
-    Why ``create_app()`` instead of the module-level ``app``?
-    - Each test gets its own isolated instance -- no shared middleware state,
-      no leftover exception handlers from a previous test.
-    - Stage 2 can parameterise this fixture with ``components`` to inject
-      mock services (DB, LLM) without modifying any test.
 
-    The ``with`` block ensures the lifespan runs:
-      - startup: ensure_directories() + configure_logging()
-      - shutdown: (no-op in Stage 1; Stage 2 closes DB connections)
+@pytest.fixture()
+def client_factory(override_settings):
+    """Build scoped TestClients with injected components and dependency overrides.
 
-    ``raise_server_exceptions=False`` tells TestClient to return the HTTP
-    response even when the server raises an exception, so our exception-handler
-    tests can assert the JSON body instead of seeing a pytest traceback.
-
-    Note on asyncio_mode=auto (pytest.ini):
-    This is a *sync* fixture. pytest-anyio does not wrap sync generators in an
-    event loop, so the TestClient's internal anyio event loop starts cleanly
-    without fighting the outer anyio event loop that asyncio_mode creates for
-    async tests. The fixture is intentionally sync -- TestClient itself manages
-    its own event loop via anyio.from_thread.
+    ``configure_app`` is a test-only seam for mounting probe routes before the
+    TestClient starts. Overrides are always cleared, even if setup or a test
+    body raises.
     """
-    tc = TestClient(create_app(), raise_server_exceptions=False)
-    tc.__enter__()
-    yield tc
-    tc.__exit__(None, None, None)
+    from contextlib import contextmanager
+
+    @contextmanager
+    def make_client(*, components=None, dependency_overrides=None, configure_app=None):
+        app = create_app(components=components)
+        if configure_app is not None:
+            configure_app(app)
+        app.dependency_overrides.update(dependency_overrides or {})
+        try:
+            with TestClient(app, raise_server_exceptions=False) as tc:
+                yield tc
+        finally:
+            app.dependency_overrides.clear()
+
+    return make_client
+
+
+@pytest.fixture()
+def client(client_factory):
+    """Default isolated TestClient, retaining the Stage 1 fixture interface."""
+    with client_factory() as tc:
+        yield tc
