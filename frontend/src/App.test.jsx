@@ -5,6 +5,7 @@ vi.mock('./pages/OverviewPage.jsx', () => ({ default: () => <div data-testid="ov
 vi.mock('./pages/CompaniesPage.jsx', () => ({ default: () => <div data-testid="companies-page" /> }))
 vi.mock('./pages/AnomaliesPage.jsx', () => ({ default: () => <div data-testid="anomalies-page" /> }))
 vi.mock('./pages/ThesisPage.jsx', () => ({ default: () => <div data-testid="thesis-page" /> }))
+vi.mock('./pages/ResearchPage.jsx', () => ({ default: () => <div data-testid="research-page" /> }))
 vi.mock('./pages/SectionPage.jsx', () => ({ default: ({ title }) => <div data-testid="section-page">{title}</div> }))
 
 import App from './App.jsx'
@@ -43,11 +44,18 @@ describe('App routing', () => {
     expect(screen.queryByTestId('section-page')).toBeNull()
   })
 
-  it('renders foundation shells for the remaining section routes', () => {
+  it('renders the Research page for /research', () => {
     window.history.pushState({}, '', '/research')
     render(<App />)
+    expect(screen.getByTestId('research-page')).toBeTruthy()
+    expect(screen.queryByTestId('section-page')).toBeNull()
+  })
+
+  it('renders foundation shells for the remaining section routes', () => {
+    window.history.pushState({}, '', '/reports')
+    render(<App />)
     const shell = screen.getByTestId('section-page')
-    expect(shell.textContent).toBe('AI Research')
+    expect(shell.textContent).toBe('Reports')
   })
 
   it('renders a foundation shell for the watchlist route', () => {

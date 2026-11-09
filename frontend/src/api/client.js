@@ -24,6 +24,7 @@ export function getApiErrorMessage(error) {
     409: 'This request conflicts with the current records. Refresh and try again.',
     422: 'Some request information was not accepted. Check it and try again.',
     500: 'The backend encountered a problem. Please try again later.',
+    503: 'The service is temporarily unavailable. Please try again later.',
   }
   if (messages[status]) return messages[status]
   if (!error?.response && (error?.isAxiosError || error?.code === 'ERR_NETWORK')) {

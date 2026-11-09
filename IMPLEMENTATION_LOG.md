@@ -2229,3 +2229,82 @@ Executed in the project virtual environment:
 - The detail endpoint's embedded assessment list feeds only the
   latest-assessment block; the timeline always reads the paginated history
   endpoint, per the approved design.
+
+## M10 Stage 5 — Research page (evidence-led Q&A workspace)
+
+**Status:** ✅ STAGE 5 COMPLETE; Stage 6 is not started
+
+**Date:** 2026-11-09
+
+### What was built
+
+- The `/research` route now renders the evidence-led research workspace
+  instead of the foundation shell: an ingested-company dropdown populated
+  from `GET /api/v1/companies?limit=100`, a question textarea with
+  client-side 1–4000 character validation and a live character counter
+  (over-limit turns red and blocks submit), a "Save this run as a report"
+  checkbox (checked by default), and a manual "Run research" submit —
+  nothing is ever submitted on page load, and the form stays filled after
+  errors.
+- One API call per run: `runResearch({ ticker, question, save, signal })`
+  (`frontend/src/api/research.js`) POSTs exactly `{ ticker, question, save }`
+  to `/research` with the abort signal and a 300000 ms timeout (the first
+  per-request timeout override in the client), and validates the response
+  through the additive `researchResult` validator: company/tool-call/
+  report shapes are strict, `validation` may be null, its `ok` verdict is
+  required when present, and its five detail arrays are optional.
+- Result panels per successful run: the answer labelled
+  "LLM-generated · evidence-validated" with save status and report id,
+  the deterministic PASS/FAIL verdict, evidence-check buckets (verified
+  numbers, unverified numbers, unsupported citations, notes) where empty
+  buckets hide but a failed verdict never does, citations as plain
+  accession text (no links), retrieved tool calls with arguments and
+  filing chunk ids, limitations including the removed unsupported
+  sentences, and a collapsible audit trace carrying the iteration and
+  revision counts.
+- Session-only history: successful runs accumulate in memory as a
+  selectable list (ticker + PASS/FAIL + question); selecting a run swaps
+  the result panels. No server-side history, no thread continuation, no
+  cancel control — the AbortController exists only to release the request
+  when the page unmounts, and a timeout is explained as "the client
+  stopped waiting; the backend may still be processing it".
+- Error mapping: 404 → the ingested-companies-only explanation; 503 → the
+  new shared static message, except the known sanitized
+  "Research completed, but report persistence failed." detail (compared,
+  never rendered) which reports that research completed but saving
+  failed; 500 / network / malformed responses keep the shared handling.
+  Raw backend details never reach the screen and no run is ever called
+  "cancelled".
+- `client.js` gained an additive HTTP 503 → "The service is temporarily
+  unavailable. Please try again later." mapping (plus its test row); no
+  existing message or behavior changed.
+- Routing: `ResearchPage` mounted at `/research` in `App.jsx`; the
+  foundation-shell route test moved from `/research` to `/reports`.
+
+### Verification
+
+- `npm test`: **103 passed across 14 test files** (baseline 80 + 23 new:
+  6 API tests (exact payload, save default/false, timeout + abort signal,
+  valid response, malformed responses), 15 page tests (company loading,
+  form validation, running state, full PASS sections, FAIL buckets,
+  save/no-save, 404, 503, persistence-503, timeout, network, malformed,
+  retry, session-run selection, no POST on mount), 1 routing test, 1
+  client 503 mapping row).
+- `npm run lint` (oxlint): passed with no findings.
+- Production build (`vite build`): passed; no errors (pre-existing
+  chunk-size warning only).
+- Backend untouched; no database writes.
+
+### Limitations
+
+- The session run list is memory-only: a page refresh loses it (by
+  design — report browsing belongs to a later stage).
+- The timeout path cannot retrieve the completed run; the user is told
+  the run may continue on the backend and to try again, rather than being
+  offered a phantom result or a cancellation claim.
+- The company dropdown reads the first 100 ingested companies (the
+  endpoint's page limit).
+- A null `validation` (never produced by the current backend) renders an
+  explicit "no validation report" note rather than a PASS or FAIL claim.
+- Thread ids stay internal: they are validated but never displayed, and
+  no follow-up/continuation affordance exists.

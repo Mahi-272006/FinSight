@@ -8,6 +8,7 @@ describe('safe API error messages', () => {
     [409, 'This request conflicts with the current records. Refresh and try again.'],
     [422, 'Some request information was not accepted. Check it and try again.'],
     [500, 'The backend encountered a problem. Please try again later.'],
+    [503, 'The service is temporarily unavailable. Please try again later.'],
   ])('maps HTTP %i to a static message', (status, expected) => {
     const message = getApiErrorMessage({
       response: { status, data: { detail: 'postgres://private-dsn' } },

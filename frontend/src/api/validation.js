@@ -148,6 +148,51 @@ const assessmentResultRecord = (item) => isRecord(item)
   && Array.isArray(item.signals_context)
   && item.signals_context.every(signalContextRecord)
 
+// Research runs: the answer is LLM-generated text plus a deterministic
+// validation report, the retrieved-tool audit, and save metadata. The
+// validation object may be null; when present its `ok` verdict is required
+// while the five detail arrays stay optional (the contract guarantees the
+// keys, but partial fixtures and future additions must not break rendering).
+const stringArray = (value) => Array.isArray(value) && value.every(isString)
+
+const researchValidationRecord = (item) => isRecord(item)
+  && typeof item.ok === 'boolean'
+  && (item.citations === undefined || stringArray(item.citations))
+  && (item.unsupported_citations === undefined || stringArray(item.unsupported_citations))
+  && (item.verified_numbers === undefined || stringArray(item.verified_numbers))
+  && (item.unverified_numbers === undefined || stringArray(item.unverified_numbers))
+  && (item.notes === undefined || stringArray(item.notes))
+
+const toolCallRecord = (item) => isRecord(item)
+  && isString(item.tool)
+  && isRecord(item.args)
+  && Array.isArray(item.chunk_ids)
+  && item.chunk_ids.every(isString)
+
+const researchResultRecord = (item) => isRecord(item)
+  && isString(item.question)
+  && isString(item.ticker)
+  // The route 404s when the company is unknown, so a 200 always carries it.
+  && isRecord(item.company)
+  && isPositiveInteger(item.company.cik)
+  && isString(item.company.ticker)
+  && isString(item.company.name)
+  && isString(item.final_answer)
+  && Array.isArray(item.citations)
+  && item.citations.every(isString)
+  && Array.isArray(item.limitations)
+  && item.limitations.every(isString)
+  && Array.isArray(item.trace)
+  && item.trace.every(isString)
+  && (item.validation === null || researchValidationRecord(item.validation))
+  && isNonNegativeInteger(item.iterations)
+  && isNonNegativeInteger(item.revises)
+  && Array.isArray(item.tool_calls)
+  && item.tool_calls.every(toolCallRecord)
+  && isString(item.thread_id)
+  && typeof item.save_requested === 'boolean'
+  && (item.report_id === null || isPositiveInteger(item.report_id))
+
 const validators = {
   companies: companyRecord,
   company: companyRecord,
@@ -172,6 +217,7 @@ const validators = {
   thesis: thesisRecord,
   assessment: assessmentRecord,
   assessmentResult: assessmentResultRecord,
+  researchResult: researchResultRecord,
   anomalies: (item) => isRecord(item)
     && isPositiveInteger(item.id)
     && isPositiveInteger(item.cik)
