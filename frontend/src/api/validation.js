@@ -148,11 +148,12 @@ const assessmentResultRecord = (item) => isRecord(item)
   && Array.isArray(item.signals_context)
   && item.signals_context.every(signalContextRecord)
 
-// Research runs: the answer is LLM-generated text plus a deterministic
-// validation report, the retrieved-tool audit, and save metadata. The
-// validation object may be null; when present its `ok` verdict is required
-// while the five detail arrays stay optional (the contract guarantees the
-// keys, but partial fixtures and future additions must not break rendering).
+// Research runs and stored reports carry the same 11-field ResearchResult
+// body: the LLM answer, the deterministic validation report, the
+// retrieved-tool audit and the recorded removals. The validation object may
+// be null; when present its `ok` verdict is required while the five detail
+// arrays stay optional (the contract guarantees the keys, but partial
+// fixtures and future additions must not break rendering).
 const stringArray = (value) => Array.isArray(value) && value.every(isString)
 
 const researchValidationRecord = (item) => isRecord(item)
@@ -169,10 +170,11 @@ const toolCallRecord = (item) => isRecord(item)
   && Array.isArray(item.chunk_ids)
   && item.chunk_ids.every(isString)
 
-const researchResultRecord = (item) => isRecord(item)
+const researchResultBodyRecord = (item) => isRecord(item)
   && isString(item.question)
   && isString(item.ticker)
-  // The route 404s when the company is unknown, so a 200 always carries it.
+  // The run route 404s when the company is unknown and the report service
+  // refuses to persist a result without one, so both 200s carry a record.
   && isRecord(item.company)
   && isPositiveInteger(item.company.cik)
   && isString(item.company.ticker)
@@ -189,9 +191,27 @@ const researchResultRecord = (item) => isRecord(item)
   && isNonNegativeInteger(item.revises)
   && Array.isArray(item.tool_calls)
   && item.tool_calls.every(toolCallRecord)
+
+// The /research response adds save metadata beside the body. Stored report
+// detail does not: its `result` is a lossless snapshot of the body alone —
+// thread_id sits at the response's top level, and save_requested/report_id
+// are response-only — so the body record must never require them.
+const researchResultRecord = (item) => researchResultBodyRecord(item)
   && isString(item.thread_id)
   && typeof item.save_requested === 'boolean'
   && (item.report_id === null || isPositiveInteger(item.report_id))
+
+// Report list rows, and the summary half of a report-detail response.
+const reportSummaryRecord = (item) => isRecord(item)
+  && isPositiveInteger(item.id)
+  && isPositiveInteger(item.cik)
+  && isString(item.ticker)
+  && isString(item.question)
+  && isString(item.thread_id)
+  && isDateString(item.created_at)
+
+const reportDetailRecord = (item) => reportSummaryRecord(item)
+  && researchResultBodyRecord(item.result)
 
 const validators = {
   companies: companyRecord,
@@ -200,13 +220,8 @@ const validators = {
     && isPositiveInteger(item.cik)
     && isString(item.ticker)
     && isDateString(item.created_at),
-  reports: (item) => isRecord(item)
-    && isPositiveInteger(item.id)
-    && isPositiveInteger(item.cik)
-    && isString(item.ticker)
-    && isString(item.question)
-    && isString(item.thread_id)
-    && isDateString(item.created_at),
+  reports: reportSummaryRecord,
+  reportDetail: reportDetailRecord,
   theses: (item) => isRecord(item)
     && isPositiveInteger(item.id)
     && isString(item.ticker)

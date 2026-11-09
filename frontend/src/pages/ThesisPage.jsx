@@ -1,11 +1,11 @@
 import { useState } from 'react'
-import { ChevronLeft, ChevronRight, Plus, X } from 'lucide-react'
+import { Plus, X } from 'lucide-react'
 import { assessThesis, createThesis, getAssessmentHistory, getThesis, getTheses } from '../api/theses.js'
 import { getCompanies } from '../api/overview.js'
 import { getCompanyMetrics } from '../api/companies.js'
 import { getApiErrorMessage } from '../api/client.js'
 import { useLoad } from '../hooks/useLoad.js'
-import { Button, EmptyState, ErrorState, LoadingState, PageIntro, Panel } from '../components/ui.jsx'
+import { Button, EmptyState, ErrorState, LoadingState, PageIntro, Pagination, Panel } from '../components/ui.jsx'
 import './ThesisPage.css'
 
 const listSize = 50
@@ -158,7 +158,7 @@ function ThesisPage() {
                   </button>
                 ))}
               </div>
-              <Pagination page={listState.data} offset={listOffset} setOffset={setListOffset} />
+              <Pagination page={listState.data} offset={listOffset} setOffset={setListOffset} className="thesis-pagination" />
             </>
           )}
         </Panel>
@@ -393,7 +393,7 @@ function ThesisDetail({ thesisId }) {
                 </li>
               ))}
             </ol>
-            <Pagination page={historyState.data} offset={historyOffset} setOffset={setHistoryOffset} />
+            <Pagination page={historyState.data} offset={historyOffset} setOffset={setHistoryOffset} className="thesis-pagination" />
           </>
         )}
       </Panel>
@@ -638,34 +638,6 @@ function ThesisForm({ companies, companiesState, onRetryCompanies, onCancel, onC
         </p>
       </form>
     </Panel>
-  )
-}
-
-function Pagination({ page, offset, setOffset }) {
-  return (
-    <div className="thesis-pagination" aria-label="Table pagination">
-      <span>
-        {page.total === 0
-          ? 'No records'
-          : `${offset + 1}–${Math.min(offset + page.items.length, page.total)} of ${page.total}`}
-      </span>
-      <button
-        type="button"
-        aria-label="Previous page"
-        disabled={offset === 0}
-        onClick={() => setOffset(Math.max(0, offset - page.limit))}
-      >
-        <ChevronLeft size={16} />
-      </button>
-      <button
-        type="button"
-        aria-label="Next page"
-        disabled={offset + page.items.length >= page.total}
-        onClick={() => setOffset(offset + page.limit)}
-      >
-        <ChevronRight size={16} />
-      </button>
-    </div>
   )
 }
 

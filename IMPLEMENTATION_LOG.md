@@ -2308,3 +2308,99 @@ Executed in the project virtual environment:
   explicit "no validation report" note rather than a PASS or FAIL claim.
 - Thread ids stay internal: they are validated but never displayed, and
   no follow-up/continuation affordance exists.
+
+## M10 Stage 6 — Reports page (saved research browser)
+
+**Status:** ✅ STAGE 6 COMPLETE; Stage 7 is not started
+
+**Date:** 2026-11-10
+
+### What was built
+
+- `/reports` now renders the Reports workspace: a master–detail browser
+  of saved research with **local-state selection** (no deep-link routing,
+  no AppShell change). The register lists reports from
+  `GET /api/v1/reports` (page size 50, server order `created_at DESC,
+  id DESC`) with shared offset pagination; the detail column renders the
+  full stored report from `GET /api/v1/reports/{id}`.
+- List rows show only real summary fields — `Report #N`, ticker,
+  question, UTC saved date — with no validation verdict, thread id or
+  invented fields. The newest row (row 1) is auto-selected; clicking a
+  row switches the detail and flips `aria-pressed`.
+- Detail header: title `Report #N · TICKER`, `Saved as report #N`
+  badge, the question, `Saved {UTC date+time}` and a zero-padded CIK;
+  beneath it the shared evidence panels are fed the stored **11-field**
+  `result` body plus the save line `Saved as report #N`. PASS/FAIL
+  verdicts, buckets, citations (plain text, never links), tool-call
+  provenance, limitations, and the audit trace all come from the stored
+  body exactly as generated.
+- New `frontend/src/api/reports.js` exports only
+  `getReport(reportId, { signal })`; the list reuses
+  `overview.js getReports({ limit: 50, offset, signal })` (the
+  CompaniesPage pattern).
+- `validation.js` gained an additive split: `researchResultBodyRecord`
+  (the 11-field stored body — it never requires `thread_id`,
+  `save_requested` or `report_id` inside `result`) is shared by the
+  behavior-unchanged `researchResult` validator and the new
+  `reportDetail` validator (`reportSummaryRecord` + `result`); the
+  `reports` list validator now reuses `reportSummaryRecord` with
+  identical checks.
+- Extracted `ResearchResultPanels` (component + result CSS moved out of
+  ResearchPage) so ResearchPage and ReportsPage render identical
+  evidence panels from one source; `ValidationBadge` is exported as a
+  component (oxlint fast-refresh `only-export-components` rule).
+  ResearchPage behavior is unchanged — all 15 of its tests pass
+  unchanged.
+- Shared `Pagination` added to `components/ui.jsx` with markup,
+  aria-labels (`Previous page` / `Next page`) and range text
+  (`1–50 of N` / `No records`) identical to the page-local copies;
+  Companies, Anomalies, Thesis and Reports all use it with their own
+  class names, and the three local copies were deleted.
+- Error/empty states: empty list → "No saved research yet" with a
+  Start-research link (copy mirrors the Overview); no selection →
+  "No report selected"; detail 404 → static "Report not found" (the raw
+  backend detail is never rendered); other detail/list errors → shared
+  messages with retry; malformed responses → the shared invalid-response
+  message. Timestamps render in UTC everywhere.
+- Routing/tests: `App.jsx` mounts `ReportsPage` at `/reports`;
+  `App.test.jsx` mocks the page and replaces the stale foundation-shell
+  `/reports` test (the watchlist shell test is kept).
+
+### Verification
+
+- Full frontend suite: `npx vitest run --maxWorkers=2` → **121 passed
+  across 16 test files** (baseline 103 + 18 new: 5 API tests — exact
+  path/signal, body without response-only metadata, null validation,
+  12 malformed cases, non-record body; 13 page tests — list loading,
+  auto-select of newest row, UTC dates, empty state, list error +
+  retry, pagination offsets and disabled ends, detail loading, full
+  PASS evidence sections, FAIL buckets + removals, detail 404, detail
+  500 + retry, malformed message, row selection switch, no invented
+  list fields, thread id kept internal). All 15 pre-existing
+  ResearchPage tests pass unchanged.
+  Note: plain `npm test` (default ~11 workers) intermittently hits
+  5000 ms wall-clock timeouts from parallel cold-transform contention
+  on this loaded machine; the failures move between runs and hit
+  unmodified files too. Every file passes in targeted runs, and
+  `npx vitest run --testTimeout=15000` (default workers) also passed
+  121/121, confirming the failures are environmental.
+- `npm run lint` (oxlint): **0 findings**.
+- Production build (`npx vite build` with the approved temp config,
+  output to the approved temp dir): **exit 0**, 2713 modules; only the
+  pre-existing >500 kB chunk warning.
+- Backend untouched; no database writes; `git status` shows changes
+  under `frontend/` only.
+
+### Limitations
+
+- Selection is local state: there is no deep link to a specific report
+  (`/reports/{id}` is out of scope for this stage), so a refresh
+  returns to the newest stored report.
+- Browsing is read-only: no edit, delete, export or
+  thread-continuation affordances; thread ids are validated at the top
+  level of the detail response but never displayed.
+- The register offers offset pagination only — no search, filter or
+  sort controls (the endpoint provides none beyond its fixed
+  ordering), and the client fetches one page of 50 at a time.
+- A report deleted after its list row was read shows the static
+  not-found state; the list is not auto-refreshed.

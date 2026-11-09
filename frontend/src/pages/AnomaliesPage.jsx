@@ -1,9 +1,9 @@
 import { useState } from 'react'
-import { ChevronLeft, ChevronRight, ShieldAlert } from 'lucide-react'
+import { ShieldAlert } from 'lucide-react'
 import { getAnomalySignals } from '../api/anomalies.js'
 import { getCompanies } from '../api/overview.js'
 import { useLoad } from '../hooks/useLoad.js'
-import { EmptyState, ErrorState, LoadingState, PageIntro, Panel } from '../components/ui.jsx'
+import { EmptyState, ErrorState, LoadingState, PageIntro, Pagination, Panel } from '../components/ui.jsx'
 import './AnomaliesPage.css'
 
 // Mirrors the backend SignalType enum; no endpoint exposes the catalog yet.
@@ -110,7 +110,7 @@ function SignalRegister({ ticker }) {
           <div className="signal-list">
             {registerState.data.items.map((signal) => <SignalRow key={signal.id} signal={signal} />)}
           </div>
-          <Pagination page={registerState.data} offset={offset} setOffset={setOffset} />
+          <Pagination page={registerState.data} offset={offset} setOffset={setOffset} className="anomaly-pagination" />
         </>
       )}
     </Panel>
@@ -145,14 +145,6 @@ function SignalRow({ signal }) {
       </div>
     </article>
   )
-}
-
-function Pagination({ page, offset, setOffset }) {
-  return <div className="anomaly-pagination" aria-label="Table pagination">
-    <span>{page.total === 0 ? 'No records' : `${offset + 1}–${Math.min(offset + page.items.length, page.total)} of ${page.total}`}</span>
-    <button type="button" aria-label="Previous page" disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - page.limit))}><ChevronLeft size={16} /></button>
-    <button type="button" aria-label="Next page" disabled={offset + page.items.length >= page.total} onClick={() => setOffset(offset + page.limit)}><ChevronRight size={16} /></button>
-  </div>
 }
 
 export default AnomaliesPage

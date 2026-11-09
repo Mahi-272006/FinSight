@@ -1,4 +1,4 @@
-import { ArrowUpRight, RefreshCw, TriangleAlert } from 'lucide-react'
+import { ArrowUpRight, ChevronLeft, ChevronRight, RefreshCw, TriangleAlert } from 'lucide-react'
 import { Link } from 'react-router-dom'
 
 export function Button({ children, variant = 'primary', className = '', ...props }) {
@@ -76,6 +76,37 @@ export function ErrorState({ message, onRetry }) {
 
 export function DataTable({ children, className = '' }) {
   return <div className={`table-scroll ${className}`.trim()}><table>{children}</table></div>
+}
+
+// Shared offset pagination. Markup and accessibility labels are identical to
+// the page-local copies this replaces; each page passes its own class name
+// so existing pagination styles keep applying.
+export function Pagination({ page, offset, setOffset, className = 'pagination' }) {
+  return (
+    <div className={className} aria-label="Table pagination">
+      <span>
+        {page.total === 0
+          ? 'No records'
+          : `${offset + 1}–${Math.min(offset + page.items.length, page.total)} of ${page.total}`}
+      </span>
+      <button
+        type="button"
+        aria-label="Previous page"
+        disabled={offset === 0}
+        onClick={() => setOffset(Math.max(0, offset - page.limit))}
+      >
+        <ChevronLeft size={16} />
+      </button>
+      <button
+        type="button"
+        aria-label="Next page"
+        disabled={offset + page.items.length >= page.total}
+        onClick={() => setOffset(offset + page.limit)}
+      >
+        <ChevronRight size={16} />
+      </button>
+    </div>
+  )
 }
 
 export function PageIntro({ eyebrow, title, description, action }) {

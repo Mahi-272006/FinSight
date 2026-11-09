@@ -6,6 +6,7 @@ vi.mock('./pages/CompaniesPage.jsx', () => ({ default: () => <div data-testid="c
 vi.mock('./pages/AnomaliesPage.jsx', () => ({ default: () => <div data-testid="anomalies-page" /> }))
 vi.mock('./pages/ThesisPage.jsx', () => ({ default: () => <div data-testid="thesis-page" /> }))
 vi.mock('./pages/ResearchPage.jsx', () => ({ default: () => <div data-testid="research-page" /> }))
+vi.mock('./pages/ReportsPage.jsx', () => ({ default: () => <div data-testid="reports-page" /> }))
 vi.mock('./pages/SectionPage.jsx', () => ({ default: ({ title }) => <div data-testid="section-page">{title}</div> }))
 
 import App from './App.jsx'
@@ -51,11 +52,11 @@ describe('App routing', () => {
     expect(screen.queryByTestId('section-page')).toBeNull()
   })
 
-  it('renders foundation shells for the remaining section routes', () => {
+  it('renders the Reports page for /reports', () => {
     window.history.pushState({}, '', '/reports')
     render(<App />)
-    const shell = screen.getByTestId('section-page')
-    expect(shell.textContent).toBe('Reports')
+    expect(screen.getByTestId('reports-page')).toBeTruthy()
+    expect(screen.queryByTestId('section-page')).toBeNull()
   })
 
   it('renders a foundation shell for the watchlist route', () => {

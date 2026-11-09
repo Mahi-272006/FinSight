@@ -2,13 +2,15 @@ import { useState } from 'react'
 import {
   CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from 'recharts'
-import { ChevronLeft, ChevronRight, ExternalLink } from 'lucide-react'
+import { ExternalLink } from 'lucide-react'
 import {
   getCompany, getCompanyFacts, getCompanyMetricHistory, getCompanyMetrics,
 } from '../api/companies.js'
 import { getCompanies } from '../api/overview.js'
 import { useLoad } from '../hooks/useLoad.js'
-import { DataTable, EmptyState, ErrorState, LoadingState, PageIntro, Panel } from '../components/ui.jsx'
+import {
+  DataTable, EmptyState, ErrorState, LoadingState, PageIntro, Pagination, Panel,
+} from '../components/ui.jsx'
 import './CompaniesPage.css'
 
 const metricNames = [
@@ -177,7 +179,7 @@ function CompanyResearch({ ticker }) {
               </tr>
             ))}</tbody>
           </DataTable>
-          <Pagination page={metricPage.data} offset={metricOffset} setOffset={setMetricOffset} />
+          <Pagination page={metricPage.data} offset={metricOffset} setOffset={setMetricOffset} className="company-pagination" />
         </>}
       </Panel>
 
@@ -211,7 +213,7 @@ function CompanyResearch({ ticker }) {
               </tr>
             })}</tbody>
           </DataTable>
-          <Pagination page={factPage.data} offset={factOffset} setOffset={setFactOffset} />
+          <Pagination page={factPage.data} offset={factOffset} setOffset={setFactOffset} className="company-pagination" />
         </>}
       </Panel>
     </>
@@ -286,14 +288,6 @@ function HistoryView({ page, metric }) {
       <tbody>{points.map((item) => <tr key={item.id}><td>{periodLabel(item)} · {item.period_type}</td><td className="numeric-cell">{displayValue(item.value, item.unit, metric)}</td><td>{item.unit}</td><td className="provenance-cell">{item.source_accessions.length ? item.source_accessions.join(', ') : 'No accession recorded'}</td></tr>)}</tbody>
     </DataTable>
   </>
-}
-
-function Pagination({ page, offset, setOffset }) {
-  return <div className="company-pagination" aria-label="Table pagination">
-    <span>{page.total === 0 ? 'No records' : `${offset + 1}–${Math.min(offset + page.items.length, page.total)} of ${page.total}`}</span>
-    <button type="button" aria-label="Previous page" disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - page.limit))}><ChevronLeft size={16} /></button>
-    <button type="button" aria-label="Next page" disabled={offset + page.items.length >= page.total} onClick={() => setOffset(offset + page.limit)}><ChevronRight size={16} /></button>
-  </div>
 }
 
 export default CompaniesPage
