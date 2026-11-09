@@ -25,7 +25,7 @@ do, so every loop bound is code.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable, Sequence
+from typing import Any, Callable
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
@@ -99,31 +99,68 @@ def make_research_node(deps: GraphDeps, chain: Any) -> Callable[[ResearchState],
 def make_execute_tools_node(deps: GraphDeps) -> Callable[[ResearchState], dict]:
     def execute_tools(state: ResearchState) -> dict:
         last_ai = state["messages"][-1]
-        observations: list[dict] = []
+        observations: list[evidence.ToolObservation] = []
+        records_to_add: list[evidence.EvidenceRecord] = []
+        known_records = {
+            record["evidence_id"]: record
+            for record in state.get("evidence_records", [])
+        }
         new_messages: list[ToolMessage] = []
         trace: list[str] = []
         for call in last_ai.tool_calls:
             name, args, call_id = call["name"], call["args"], call["id"]
-            fn = deps.tools_by_name.get(name)
-            if fn is None:
-                content = (f"Unknown tool {name!r}. Available tools: "
-                           f"{sorted(deps.tools_by_name)}.")
+            runner = deps.tools_by_name.get(name)
+            evidence_ids: list[str] = []
+            pending_records: dict[str, evidence.EvidenceRecord] = {}
+            if runner is None:
+                content = f"Unknown research tool {name!r}; no evidence was retrieved."
+                status: evidence.ToolOutcome = "unknown_tool"
             else:
                 try:
-                    content = str(fn.invoke(args))
-                except Exception as exc:  # noqa: BLE001 -- tool errors inform, not crash
-                    content = f"Tool {name} failed: {type(exc).__name__}: {exc}"
+                    if hasattr(runner, "execute"):
+                        execution = runner.execute(args)
+                        content = execution.content
+                        status = execution.status
+                        produced = execution.evidence_records
+                    else:
+                        # Injected text-only tools stay operational and never
+                        # become evidence merely because they returned text.
+                        content = str(runner.invoke(args))
+                        status = "success"
+                        produced = []
+                    for record in produced:
+                        evidence_id = record["evidence_id"]
+                        prior = pending_records.get(evidence_id, known_records.get(evidence_id))
+                        if prior is not None and prior != record:
+                            raise ValueError("inconsistent record reused an evidence ID")
+                        pending_records[evidence_id] = record
+                        evidence_ids.append(evidence_id)
+                    evidence_ids = list(dict.fromkeys(evidence_ids))
+                    if not evidence_ids and status == "success":
+                        status = "no_results"
+                    if status == "success":
+                        for evidence_id, record in pending_records.items():
+                            if evidence_id not in known_records:
+                                records_to_add.append(record)
+                            known_records[evidence_id] = record
+                except Exception:  # noqa: BLE001 -- no raw error detail enters evidence
+                    content = f"Tool {name} failed; no evidence was retrieved."
+                    status = "error"
+                    evidence_ids = []
+            if status not in {"success", "no_results", "error", "unknown_tool"}:
+                content = f"Tool {name} returned an invalid outcome; no evidence was retrieved."
+                status = "error"
+            if status != "success":
+                evidence_ids = []
             new_messages.append(ToolMessage(content=content, tool_call_id=call_id))
-            observations.append({
-                "tool": name,
-                "args": dict(args),
-                "content": content,
-                "chunk_ids": sorted(evidence.extract_chunk_ids(content)),
-            })
+            observations.append(evidence.make_tool_observation(
+                name, args, content, status=status, evidence_ids=evidence_ids
+            ))
             trace.append(f"tool {name}({', '.join(f'{k}={v}' for k, v in args.items())})")
         return {
             "messages": new_messages,
             "tool_observations": observations,
+            "evidence_records": records_to_add,
             "trace": trace,
         }
 
@@ -151,10 +188,18 @@ def make_validate_node(deps: GraphDeps) -> Callable[[ResearchState], dict]:
             if isinstance(message, AIMessage) and not message.tool_calls:
                 draft = str(message.content)
                 break
-        observations = [o["content"] for o in state.get("tool_observations", [])]
-        report = evidence.validate_answer(draft, observations)
+        claims, parse_findings = evidence.parse_answer_claims(draft)
+        validation = evidence.validate_answer(
+            claims,
+            state.get("evidence_records", []),
+            expected_cik=(state.get("company") or {}).get("cik"),
+        )
+        report = validation.report
         return {
             "draft_answer": draft,
+            "draft_claims": claims,
+            "accepted_claims": validation.accepted_claims,
+            "claim_findings": [*parse_findings, *validation.findings],
             "validation_report": report.to_dict(),
             "trace": [f"validate: {report.summary()}"],
         }
@@ -176,9 +221,10 @@ def make_revise_node(deps: GraphDeps) -> Callable[[ResearchState], dict]:
                 f"{len(unverified)} unverified number(s){note_text}. "
                 f"Unsupported citations: {unsupported}. "
                 f"Unverified numbers: {unverified}. "
-                "Revise using only evidence from tool results: cite retrieved "
-                "accessions, quote figures exactly as the tools returned them, "
-                "and drop anything you cannot ground."
+                "Revise using the required JSON claims format. Each factual "
+                "claim must name supporting_evidence_ids from this run and "
+                "include exact metric, fiscal period, unit, and numeric_value "
+                "fields when applicable. Do not include unsupported interpretations."
             )
         )
         return {
@@ -192,21 +238,36 @@ def make_revise_node(deps: GraphDeps) -> Callable[[ResearchState], dict]:
 
 def make_finalize_node(deps: GraphDeps) -> Callable[[ResearchState], dict]:
     def finalize(state: ResearchState) -> dict:
-        draft = state.get("draft_answer", "")
-        observations = [o["content"] for o in state.get("tool_observations", [])]
-        kept, limitations = evidence.strip_unsupported(draft, observations)
+        records = state.get("evidence_records", [])
+        accepted = state.get("accepted_claims", [])
+        final_check = evidence.validate_answer(
+            accepted,
+            records,
+            expected_cik=(state.get("company") or {}).get("cik"),
+        )
+        kept = evidence.render_claims(final_check.accepted_claims, records)
+        limitations = [
+            f"Removed unsupported claim: {finding.get('claim', '')[:160]} "
+            f"({finding.get('reason', 'no deterministic support')})."
+            for finding in state.get("claim_findings", [])
+        ]
+        limitations.extend(final_check.conflicts)
         if not kept:
             kept = ("The retrieved evidence was insufficient to answer this "
                     "question with verified claims.")
             if not limitations:
                 limitations.append("no answer text survived validation")
-        report_notes = (state.get("validation_report") or {}).get("notes", [])
-        limitations = list(limitations) + [f"validation: {n}" for n in report_notes]
-        citations = sorted(evidence.extract_accessions(kept))
+        report = final_check.report
+        if not final_check.accepted_claims:
+            report.ok = False
+            if "no validated claims in final answer" not in report.notes:
+                report.notes.append("no validated claims in final answer")
         return {
             "final_answer": kept,
             "limitations": limitations,
-            "trace": [f"finalize: {len(citations)} citation(s), "
+            "validation_report": report.to_dict(),
+            "accepted_claims": final_check.accepted_claims,
+            "trace": [f"finalize: {len(report.citations)} citation(s), "
                       f"{len(limitations)} limitation(s)"],
         }
 

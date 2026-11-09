@@ -18,7 +18,7 @@ get_financial_facts, never computed.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Callable, Sequence
+from typing import Any, Callable
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
@@ -43,7 +43,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 
 from app.config import Settings, get_settings
-from app.graph import evidence, nodes
+from app.graph import nodes
 from app.graph.state import ResearchState
 from app.graph.tools import build_research_tools
 from app.services.llm_manager import LLMManager
@@ -77,6 +77,16 @@ always marked as interpretation).
 5. BE AN ANALYST, NOT A LIBRARIAN. Synthesize: state what the evidence \
 shows, then what it suggests -- with the distinction kept explicit. If the \
 tools lack what an answer needs, say precisely what is missing.
+
+6. STRUCTURED ANSWER. Return ONLY JSON with this envelope:
+{"claims":[{"text":"...","claim_type":"verified_fact|calculated_metric|filing_quote|investigation_signal|interpretation","supporting_evidence_ids":["..."],"metric":null,"source_concept":null,"fiscal_year":null,"fiscal_period":null,"period_type":null,"unit":null,"numeric_value":null,"accession":null,"value_scope":"as_filed|original|restated|latest","quote":null}]}
+Use the exact evidence IDs printed by tools. Financial claim fields must match
+one linked record. For filing_quote, quote an exact substring and set `quote`.
+Interpretations are not deterministically verifiable and will be omitted.
+Use `value_scope` `as_filed` for facts; do not claim a value is latest because
+the retrieved records do not prove that the filing set is complete.
+Do not put unrelated assertions in `text`; final output is rendered from
+validated fields and source data, not from free-form model prose.
 
 Work efficiently: one or two well-chosen tool calls per sub-question."""
 
@@ -114,11 +124,11 @@ class ResearchAgent:
         tools = build_research_tools(session_factory, store, embedder)
         # Built ONCE: tool schemas are part of the model's request, and the
         # failover chain is configured at bind time (M5 semantics).
-        chain = manager.bind_tools(tools)
+        chain = manager.bind_tools([tool.model_tool for tool in tools])
         deps = nodes.GraphDeps(
             session_factory=session_factory,
             manager=manager,
-            tools_by_name={t.name: t for t in tools},
+            tools_by_name={tool.name: tool for tool in tools},
             max_iterations=settings.agent_max_iterations,
             max_revises=settings.agent_max_revises,
         )
@@ -194,20 +204,33 @@ class ResearchAgent:
         }
         final_state = self._graph.invoke(initial, config)
         observations = final_state.get("tool_observations", [])
+        records = {
+            record["evidence_id"]: record
+            for record in final_state.get("evidence_records", [])
+        }
         final_answer = final_state.get("final_answer", "")
+        validation = final_state.get("validation_report")
         return ResearchResult(
             question=question,
             ticker=ticker.upper(),
             company=final_state.get("company"),
             final_answer=final_answer,
-            citations=sorted(evidence.extract_accessions(final_answer)),
+            citations=sorted((validation or {}).get("citations", [])),
             limitations=list(final_state.get("limitations", [])),
             trace=list(final_state.get("trace", [])),
-            validation=final_state.get("validation_report"),
+            validation=validation,
             iterations=final_state.get("iterations", 0),
             revises=final_state.get("revises", 0),
             tool_calls=[
-                {"tool": o["tool"], "args": o["args"], "chunk_ids": o["chunk_ids"]}
+                {
+                    "tool": o["tool"],
+                    "args": o["args"],
+                    "chunk_ids": sorted({
+                        records[evidence_id]["chunk_id"]
+                        for evidence_id in o["evidence_ids"]
+                        if evidence_id in records and records[evidence_id].get("chunk_id")
+                    }),
+                }
                 for o in observations
             ],
         )
