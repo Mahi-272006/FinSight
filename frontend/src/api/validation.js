@@ -59,6 +59,30 @@ const factRecord = (item) => isRecord(item)
   && isNullableFiniteNumber(item.value_original)
   && isDateString(item.created_at)
 
+const anomalySignalRecord = (item) => isRecord(item)
+  && isPositiveInteger(item.id)
+  && isPositiveInteger(item.cik)
+  && isString(item.ticker)
+  && isString(item.signal_type)
+  && isString(item.severity)
+  && isPositiveInteger(item.fiscal_year)
+  && isString(item.fiscal_period)
+  && isString(item.period_type)
+  && isString(item.headline)
+  && isString(item.explanation)
+  && isRecord(item.evidence)
+  && Array.isArray(item.source_accessions)
+  && item.source_accessions.every(isString)
+  && isDateString(item.detected_at)
+
+const anomalyRecomputeRecord = (item) => isRecord(item)
+  && isPositiveInteger(item.cik)
+  && isString(item.ticker)
+  && isNonNegativeInteger(item.total)
+  && Array.isArray(item.items)
+  && item.total === item.items.length
+  && item.items.every(anomalySignalRecord)
+
 // Thesis detail: conditions carry creation-time evidence snapshots and
 // assessments carry append-only per-condition summaries with provenance.
 const signalContextRecord = (item) => isRecord(item)
@@ -233,21 +257,8 @@ const validators = {
   assessment: assessmentRecord,
   assessmentResult: assessmentResultRecord,
   researchResult: researchResultRecord,
-  anomalies: (item) => isRecord(item)
-    && isPositiveInteger(item.id)
-    && isPositiveInteger(item.cik)
-    && isString(item.ticker)
-    && isString(item.signal_type)
-    && isString(item.severity)
-    && isPositiveInteger(item.fiscal_year)
-    && isString(item.fiscal_period)
-    && isString(item.period_type)
-    && isString(item.headline)
-    && isString(item.explanation)
-    && isRecord(item.evidence)
-    && Array.isArray(item.source_accessions)
-    && item.source_accessions.every(isString)
-    && isDateString(item.detected_at),
+  anomalies: anomalySignalRecord,
+  anomalyRecompute: anomalyRecomputeRecord,
   metrics: metricRecord,
   facts: factRecord,
 }

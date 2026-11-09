@@ -2,10 +2,13 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 vi.mock('../api/overview.js', () => ({ getCompanies: vi.fn() }))
-vi.mock('../api/anomalies.js', () => ({ getAnomalySignals: vi.fn() }))
+vi.mock('../api/anomalies.js', () => ({
+  getAnomalySignals: vi.fn(),
+  recomputeAnomalySignals: vi.fn(),
+}))
 
 import { getCompanies } from '../api/overview.js'
-import { getAnomalySignals } from '../api/anomalies.js'
+import { getAnomalySignals, recomputeAnomalySignals } from '../api/anomalies.js'
 import AnomaliesPage from './AnomaliesPage.jsx'
 
 const timestamp = '2026-01-01T00:00:00Z'
@@ -36,6 +39,7 @@ const signal = {
   detected_at: timestamp,
 }
 const page = (items, total = items.length, limit = 20, offset = 0) => ({ items, total, limit, offset })
+const recomputeResult = (items = [signal]) => ({ cik: 789019, ticker: 'MSFT', total: items.length, items })
 
 function setupSuccess({ signals = [signal] } = {}) {
   getCompanies.mockResolvedValue(page(companies, companies.length, 100, 0))
@@ -59,6 +63,9 @@ describe('Anomalies page', () => {
     expect(screen.getByText(/threshold_elevated/)).toBeTruthy()
     expect(screen.getByText(/0000789019-25-000001/)).toBeTruthy()
     expect(screen.getByText('Jan 1, 2026')).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Recalculate signals' })).toBeTruthy()
+    expect(screen.getByText(/uses stored annual financial metrics and replaces this company’s current signal set/)).toBeTruthy()
+    expect(recomputeAnomalySignals).not.toHaveBeenCalled()
   })
 
   it('shows an honest empty state when no signals are recorded for the company', async () => {
@@ -143,5 +150,89 @@ describe('Anomalies page', () => {
 
     unmount()
     expect(getAnomalySignals.mock.calls.at(-1)[1].signal.aborted).toBe(true)
+  })
+
+  it('recalculates explicitly, clears the filter, resets pagination, and reloads signals', async () => {
+    setupSuccess()
+    getAnomalySignals.mockResolvedValue(page([signal], 45))
+    recomputeAnomalySignals.mockResolvedValue(recomputeResult())
+    render(<AnomaliesPage />)
+
+    await screen.findByText(/Net income grew 12\.0%/)
+    fireEvent.click(screen.getByRole('button', { name: 'Next page' }))
+    await waitFor(() => expect(getAnomalySignals).toHaveBeenLastCalledWith(
+      'MSFT', expect.objectContaining({ offset: 20 }),
+    ))
+    fireEvent.change(screen.getByRole('combobox', { name: 'Signal type' }), {
+      target: { value: 'growth_deceleration' },
+    })
+    await waitFor(() => expect(getAnomalySignals).toHaveBeenLastCalledWith(
+      'MSFT', expect.objectContaining({ signalType: 'growth_deceleration', offset: 0 }),
+    ))
+
+    fireEvent.click(screen.getByRole('button', { name: 'Recalculate signals' }))
+
+    expect(await screen.findByText(/Recalculation completed for MSFT\. 1 signal is now stored/)).toBeTruthy()
+    expect(recomputeAnomalySignals).toHaveBeenCalledWith('MSFT')
+    await waitFor(() => expect(getAnomalySignals).toHaveBeenLastCalledWith(
+      'MSFT', expect.objectContaining({ offset: 0, signalType: undefined }),
+    ))
+    expect(screen.getByRole('combobox', { name: 'Signal type' }).value).toBe('')
+    expect(screen.getByText(/Net income grew 12\.0%/)).toBeTruthy()
+  })
+
+  it('shows the normal empty state after a successful zero-signal recomputation', async () => {
+    setupSuccess()
+    recomputeAnomalySignals.mockResolvedValue(recomputeResult([]))
+    getAnomalySignals
+      .mockResolvedValueOnce(page([signal]))
+      .mockResolvedValueOnce(page([]))
+    render(<AnomaliesPage />)
+
+    await screen.findByText(/Net income grew 12\.0%/)
+    fireEvent.click(screen.getByRole('button', { name: 'Recalculate signals' }))
+
+    expect(await screen.findByText('No investigation signals recorded')).toBeTruthy()
+    expect(screen.getByText(/No signals were found; previous signals for this company were cleared/)).toBeTruthy()
+    expect(screen.queryByText(/Net income grew 12\.0%/)).toBeNull()
+  })
+
+  it.each([
+    [422, 'Ticker is outside the supported company scope.', 'Recalculation is currently supported for MSFT, AAPL, and NVDA only.'],
+    [422, 'Insufficient annual financial data to recompute signals.', 'There is not enough stored annual financial data to recalculate signals. Update the company’s financial metrics and try again.'],
+    [404, 'Company not found.', 'This company is no longer available. Choose another company and try again.'],
+    [500, 'private database failure', 'The backend encountered a problem. Please try again later.'],
+  ])('handles recomputation failure %i without replacing the visible signals', async (status, detail, message) => {
+    setupSuccess()
+    recomputeAnomalySignals.mockRejectedValue({ response: { status, data: { detail } } })
+    render(<AnomaliesPage />)
+
+    await screen.findByText(/Net income grew 12\.0%/)
+    fireEvent.click(screen.getByRole('button', { name: 'Recalculate signals' }))
+
+    expect((await screen.findByRole('alert')).textContent).toContain(message)
+    expect(screen.queryByText(detail)).toBeNull()
+    expect(screen.getByText(/Net income grew 12\.0%/)).toBeTruthy()
+    expect(getAnomalySignals).toHaveBeenCalledTimes(1)
+    expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull()
+  })
+
+  it('prevents duplicate recomputation submissions while the request is pending', async () => {
+    setupSuccess()
+    let resolveRecompute
+    recomputeAnomalySignals.mockReturnValue(new Promise((resolve) => { resolveRecompute = resolve }))
+    render(<AnomaliesPage />)
+
+    await screen.findByText(/Net income grew 12\.0%/)
+    const button = screen.getByRole('button', { name: 'Recalculate signals' })
+    fireEvent.click(button)
+    fireEvent.click(button)
+
+    expect(recomputeAnomalySignals).toHaveBeenCalledTimes(1)
+    expect(screen.getByRole('button', { name: 'Recalculating…' }).disabled).toBe(true)
+
+    resolveRecompute(recomputeResult())
+    await screen.findByText(/Recalculation completed for MSFT/)
+    expect(recomputeAnomalySignals).toHaveBeenCalledTimes(1)
   })
 })

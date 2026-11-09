@@ -156,7 +156,7 @@ SEC fair-access policy: max 10 requests/second, identify yourself in
 | M7 | Investment thesis monitoring | ✅ |
 | M8 | Golden dataset + evaluation framework | ⬜ |
 | M9 | FastAPI endpoints | ⬜ |
-| M10 | React dashboard | ⬜ |
+| M10 | React dashboard (Stages 1–8) | ✅ |
 | M11 | Integration, hardening, demo | ⬜ |
 
 Progress is logged in [IMPLEMENTATION_LOG.md](IMPLEMENTATION_LOG.md).

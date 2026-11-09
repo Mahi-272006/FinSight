@@ -2311,7 +2311,7 @@ Executed in the project virtual environment:
 
 ## M10 Stage 6 — Reports page (saved research browser)
 
-**Status:** ✅ STAGE 6 COMPLETE; Stage 7 is not started
+**Status:** ✅ STAGE 6 COMPLETE
 
 **Date:** 2026-11-10
 
@@ -2404,3 +2404,65 @@ Executed in the project virtual environment:
   ordering), and the client fetches one page of 50 at a time.
 - A report deleted after its list row was read shows the static
   not-found state; the list is not auto-refreshed.
+
+## M10 Stage 7 — Watchlist
+
+**Status:** ✅ STAGE 7 COMPLETE
+**Date:** 2026-11-10
+
+### What was built
+
+- Added a real `/watchlist` page with paginated stored entries, prominent
+  ticker and secondary CIK display, UTC added dates, add and remove actions,
+  and static user-safe errors. The add-company picker pages through the
+  existing company endpoint so companies beyond its first page remain
+  available.
+- Added validated frontend POST/DELETE helpers and connected the route in
+  `App.jsx`. No backend route, schema, or behavior changed.
+- Added stable React keys, picker selection reset across pages, valid-page
+  recovery when removing the only row from a later page, and duplicate
+  mutation guards.
+
+### Verification
+
+- Full frontend suite: **157 passed across 18 test files**.
+- `npm run lint`: passed.
+- `npm run build`: passed; Vite reported the existing main-bundle size
+  advisory.
+- No backend changes were made.
+
+## M10 Stage 8 — Anomaly recalculation
+
+**Status:** ✅ STAGE 8 COMPLETE
+**Date:** 2026-11-10
+
+### What was built
+
+- Added `recomputeAnomalySignals` for the existing
+  `POST /api/v1/anomalies/recompute` contract. It sends exactly
+  `{ ticker }`, supports the existing API client's optional abort signal, and
+  validates the response envelope and every nested signal record. The
+  validator also requires `total` to equal `items.length`, matching the
+  backend's complete-set response.
+- Added an explicit recalculation action to the selected company's signal
+  register. Its copy states that recalculation uses stored annual metrics,
+  replaces current signals, runs only on user action, and can return zero
+  signals and clear previous entries.
+- Pending requests disable the action and an in-flight guard prevents
+  duplicate submissions. Static error mapping covers unsupported tickers,
+  insufficient annual metrics, missing companies, and unexpected failures;
+  raw backend details are never shown. Failures leave current signals and
+  filters intact and do not retry automatically.
+- On success, the page clears the signal-type filter, resets pagination,
+  reloads the persisted register, and uses the normal empty state when no
+  signals remain. No backend/API changes or background recalculation were
+  added.
+
+### Verification
+
+- Full frontend suite: recorded after implementation.
+- `npx vitest run --maxWorkers=2`: **167 passed across 18 test files**.
+- `npm run lint`: passed.
+- `npm run build`: passed (2,716 modules); Vite reported the main bundle
+  exceeds its 500 kB advisory threshold.
+- `git diff --check`: passed. No backend changes were made.

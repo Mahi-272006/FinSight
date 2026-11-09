@@ -37,6 +37,29 @@
   line-height: 1.65;
 }
 
+.anomaly-recompute__notice,
+.anomaly-recompute__error,
+.anomaly-recompute__success {
+  max-width: 760px;
+  margin: -5px 0 15px;
+  font-size: 10px;
+  line-height: 1.6;
+}
+
+.anomaly-recompute__notice {
+  color: var(--muted);
+}
+
+.anomaly-recompute__error {
+  color: var(--negative);
+  font-weight: 600;
+}
+
+.anomaly-recompute__success {
+  color: var(--positive, #3e7255);
+  font-weight: 600;
+}
+
 .signal-row__period {
   margin: 5px 0 0;
   color: var(--quiet);

@@ -1,9 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-vi.mock('./client.js', () => ({ apiClient: { get: vi.fn() } }))
+vi.mock('./client.js', () => ({ apiClient: { get: vi.fn(), post: vi.fn() } }))
 
 import { apiClient } from './client.js'
-import { getAnomalySignals } from './anomalies.js'
+import { getAnomalySignals, recomputeAnomalySignals } from './anomalies.js'
 import { InvalidApiResponseError } from './validation.js'
 
 const timestamp = '2026-01-01T00:00:00Z'
@@ -23,9 +23,18 @@ const signal = {
   detected_at: timestamp,
 }
 const page = (items, total = items.length) => ({ items, total, limit: 20, offset: 0 })
+const recomputeResult = (items = [signal]) => ({
+  cik: 789019,
+  ticker: 'MSFT',
+  total: items.length,
+  items,
+})
 
 describe('Anomalies API', () => {
-  beforeEach(() => apiClient.get.mockReset())
+  beforeEach(() => {
+    apiClient.get.mockReset()
+    apiClient.post.mockReset()
+  })
 
   it('requests persisted signals with pagination and passes the signal_type filter', async () => {
     apiClient.get.mockResolvedValue({ data: page([signal]) })
@@ -55,5 +64,43 @@ describe('Anomalies API', () => {
 
     apiClient.get.mockResolvedValue({ data: page([signal], -1) })
     await expect(getAnomalySignals('MSFT')).rejects.toBeInstanceOf(InvalidApiResponseError)
+  })
+
+  it('posts exactly the ticker and validates the complete recomputation response', async () => {
+    apiClient.post.mockResolvedValue({ data: recomputeResult() })
+    const abort = new AbortController().signal
+
+    expect(await recomputeAnomalySignals('MSFT', { signal: abort })).toEqual(recomputeResult())
+    expect(apiClient.post).toHaveBeenCalledWith(
+      '/anomalies/recompute',
+      { ticker: 'MSFT' },
+      { signal: abort },
+    )
+  })
+
+  it('accepts a successful recomputation with no signals', async () => {
+    apiClient.post.mockResolvedValue({ data: recomputeResult([]) })
+
+    await expect(recomputeAnomalySignals('AAPL')).resolves.toEqual(recomputeResult([]))
+    expect(apiClient.post).toHaveBeenCalledWith(
+      '/anomalies/recompute',
+      { ticker: 'AAPL' },
+      { signal: undefined },
+    )
+  })
+
+  it('rejects malformed recomputation envelopes and nested signal records', async () => {
+    const invalidResults = [
+      { ...recomputeResult(), cik: '789019' },
+      { ...recomputeResult(), total: -1 },
+      { ...recomputeResult(), total: 2 },
+      { ...recomputeResult(), items: [{ ...signal, evidence: null }] },
+      { ...recomputeResult(), items: [{ ...signal, source_accessions: [''] }] },
+    ]
+
+    for (const data of invalidResults) {
+      apiClient.post.mockResolvedValueOnce({ data })
+      await expect(recomputeAnomalySignals('MSFT')).rejects.toBeInstanceOf(InvalidApiResponseError)
+    }
   })
 })

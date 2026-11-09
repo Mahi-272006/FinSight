@@ -1,5 +1,5 @@
 import { apiClient } from './client.js'
-import { validatePageResponse } from './validation.js'
+import { validatePageResponse, validateRecordResponse } from './validation.js'
 
 /**
  * Read persisted investigation signals for one company.
@@ -13,4 +13,14 @@ export async function getAnomalySignals(ticker, { limit = 20, offset = 0, signal
   if (signalType) params.signal_type = signalType
   const { data } = await apiClient.get(`/anomalies/${encodeURIComponent(ticker)}`, { params, signal })
   return validatePageResponse(data, 'anomalies')
+}
+
+/**
+ * Recalculate and replace the persisted investigation signals for a company.
+ * The operation uses stored annual metrics and is only run after an explicit
+ * user action. A valid run may return an empty signal set.
+ */
+export async function recomputeAnomalySignals(ticker, { signal } = {}) {
+  const { data } = await apiClient.post('/anomalies/recompute', { ticker }, { signal })
+  return validateRecordResponse(data, 'anomalyRecompute')
 }

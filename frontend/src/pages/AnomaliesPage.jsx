@@ -1,9 +1,10 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { ShieldAlert } from 'lucide-react'
-import { getAnomalySignals } from '../api/anomalies.js'
+import { getAnomalySignals, recomputeAnomalySignals } from '../api/anomalies.js'
 import { getCompanies } from '../api/overview.js'
+import { getApiErrorMessage } from '../api/client.js'
 import { useLoad } from '../hooks/useLoad.js'
-import { EmptyState, ErrorState, LoadingState, PageIntro, Pagination, Panel } from '../components/ui.jsx'
+import { Button, EmptyState, ErrorState, LoadingState, PageIntro, Pagination, Panel } from '../components/ui.jsx'
 import './AnomaliesPage.css'
 
 // Mirrors the backend SignalType enum; no endpoint exposes the catalog yet.
@@ -33,6 +34,20 @@ function periodLabel(record) {
 
 function SeverityBadge({ value }) {
   return <span className={`severity-badge severity-badge--${String(value).toLowerCase()}`}>{value}</span>
+}
+
+function recomputeErrorMessage(error) {
+  const status = error?.response?.status
+  const detail = error?.response?.data?.detail
+  if (status === 404) return 'This company is no longer available. Choose another company and try again.'
+  if (status === 422 && detail === 'Ticker is outside the supported company scope.') {
+    return 'Recalculation is currently supported for MSFT, AAPL, and NVDA only.'
+  }
+  if (status === 422 && detail === 'Insufficient annual financial data to recompute signals.') {
+    return 'There is not enough stored annual financial data to recalculate signals. Update the company’s financial metrics and try again.'
+  }
+  if (status === 422) return 'This company or request is not eligible for recalculation.'
+  return getApiErrorMessage(error) ?? 'Recalculation did not complete. Please try again.'
 }
 
 function AnomaliesPage() {
@@ -74,6 +89,10 @@ function SignalRegister({ ticker }) {
   const [offset, setOffset] = useState(0)
   const [signalFilter, setSignalFilter] = useState('')
   const [attempt, setAttempt] = useState(0)
+  const [recomputing, setRecomputing] = useState(false)
+  const [recomputeError, setRecomputeError] = useState('')
+  const [recomputeNotice, setRecomputeNotice] = useState('')
+  const recomputeInFlight = useRef(false)
   const registerState = useLoad((signal) => getAnomalySignals(ticker, {
     limit: pageSize, offset, signalType: signalFilter || undefined, signal,
   }), [ticker, offset, signalFilter, attempt])
@@ -83,9 +102,45 @@ function SignalRegister({ ticker }) {
   // rows (a legitimate empty result for a ticker the picker validated).
   const filteredEmpty = registerState.statusCode === 404 && signalFilter !== ''
 
+  async function handleRecompute() {
+    if (recomputeInFlight.current) return
+    recomputeInFlight.current = true
+    setRecomputing(true)
+    setRecomputeError('')
+    setRecomputeNotice('')
+    try {
+      const result = await recomputeAnomalySignals(ticker)
+      setSignalFilter('')
+      setOffset(0)
+      setRecomputeNotice(result.total === 0
+        ? `Recalculation completed for ${ticker}. No signals were found; previous signals for this company were cleared.`
+        : `Recalculation completed for ${ticker}. ${result.total} signal${result.total === 1 ? ' is' : 's are'} now stored.`)
+      setAttempt((value) => value + 1)
+    } catch (error) {
+      setRecomputeError(recomputeErrorMessage(error))
+    } finally {
+      recomputeInFlight.current = false
+      setRecomputing(false)
+    }
+  }
+
   return (
-    <Panel eyebrow="SIGNAL REGISTER" title={`Investigation signals for ${ticker}`} className="anomaly-panel">
+    <Panel
+      eyebrow="SIGNAL REGISTER"
+      title={`Investigation signals for ${ticker}`}
+      className="anomaly-panel"
+      action={(
+        <Button type="button" onClick={handleRecompute} disabled={recomputing}>
+          {recomputing ? 'Recalculating…' : 'Recalculate signals'}
+        </Button>
+      )}
+    >
       <p className="anomaly-panel__intro">Signals are produced by deterministic rules over stored metrics and filings. They mark periods that deserve a closer look; they are not findings of misstatement or fraud.</p>
+      <p className="anomaly-recompute__notice">
+        Recalculation uses stored annual financial metrics and replaces this company’s current signal set. A valid run can find no signals and clear previous entries. Nothing runs until you choose Recalculate signals.
+      </p>
+      {recomputeError && <p className="anomaly-recompute__error" role="alert">{recomputeError}</p>}
+      {recomputeNotice && <p className="anomaly-recompute__success" role="status" aria-live="polite">{recomputeNotice}</p>}
       <div className="anomaly-filter">
         <label htmlFor="signal-filter">Signal type</label>
         <select
