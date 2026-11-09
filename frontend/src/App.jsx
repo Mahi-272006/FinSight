@@ -2,6 +2,7 @@ import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom'
 import AppShell from './components/AppShell.jsx'
 import OverviewPage from './pages/OverviewPage.jsx'
 import SectionPage from './pages/SectionPage.jsx'
+import CompaniesPage from './pages/CompaniesPage.jsx'
 import './App.css'
 
 const sections = [
@@ -23,7 +24,7 @@ function App() {
             <Route
               key={section.path}
               path={section.path}
-              element={<SectionPage {...section} />}
+              element={section.path === 'companies' ? <CompaniesPage /> : <SectionPage {...section} />}
             />
           ))}
           <Route path="*" element={<Navigate to="/" replace />} />

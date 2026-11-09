@@ -1,0 +1,217 @@
+.companies-page {
+  display: grid;
+  gap: 17px;
+}
+
+.company-picker,
+.history-controls {
+  display: grid;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.company-picker select,
+.history-controls select {
+  max-width: min(360px, 78vw);
+  min-height: 38px;
+  padding: 7px 34px 7px 10px;
+  color: var(--ink);
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  font-size: 11px;
+}
+
+.company-profile__details {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 16px;
+  margin: 0;
+}
+
+.company-profile__details div {
+  min-width: 0;
+  padding-left: 12px;
+  border-left: 1px solid var(--line);
+}
+
+.company-profile__details dt {
+  margin-bottom: 5px;
+  color: var(--quiet);
+  font-size: 9px;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+
+.company-profile__details dd {
+  margin: 0;
+  color: #454743;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.tabular,
+.numeric-cell {
+  font-variant-numeric: tabular-nums;
+}
+
+.company-panel__intro {
+  max-width: 760px;
+  margin: -5px 0 15px;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.65;
+}
+
+.company-table th {
+  padding-block: 9px;
+  font-size: 9px;
+}
+
+.company-table td {
+  min-width: 95px;
+  height: auto;
+  padding-block: 11px;
+  color: #555752;
+  font-size: 10px;
+  vertical-align: top;
+}
+
+.company-table .metric-name {
+  color: #424641;
+  font-weight: 600;
+  text-transform: capitalize;
+}
+
+.record-subline {
+  display: block;
+  margin-top: 4px;
+  color: #92938d;
+  font-size: 9px;
+  font-weight: 400;
+  line-height: 1.5;
+}
+
+.company-table .numeric-cell {
+  color: #3d4841;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.provenance-cell {
+  max-width: 240px;
+  overflow-wrap: anywhere;
+  color: #6f716b !important;
+  font-family: var(--sans);
+  font-size: 9px !important;
+  line-height: 1.6;
+}
+
+.evidence-details {
+  min-width: 140px;
+  max-width: 250px;
+  color: #68727a;
+  font-size: 9px;
+}
+
+.evidence-details summary {
+  cursor: pointer;
+}
+
+.evidence-details code,
+.evidence-details pre {
+  display: block;
+  max-width: 100%;
+  overflow: auto;
+  color: #5a5d59;
+  font-family: var(--sans);
+  font-size: 9px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.evidence-details code {
+  margin-top: 8px;
+  font-weight: 600;
+}
+
+.history-controls {
+  width: fit-content;
+  margin: -3px 0 17px;
+}
+
+.history-chart {
+  width: 100%;
+  height: 260px;
+  margin-bottom: 16px;
+}
+
+.source-link {
+  display: flex;
+  width: fit-content;
+  align-items: center;
+  gap: 4px;
+  margin-top: 5px;
+  color: #596873;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.company-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  padding-top: 12px;
+  color: var(--muted);
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+}
+
+.company-pagination button {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  place-items: center;
+  color: var(--accent);
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.company-pagination button:disabled {
+  color: #b9bab5;
+  cursor: not-allowed;
+}
+
+.company-pagination button:focus-visible,
+.company-picker select:focus-visible,
+.history-controls select:focus-visible,
+.evidence-details summary:focus-visible {
+  outline: 2px solid #697782;
+  outline-offset: 2px;
+}
+
+@media (max-width: 760px) {
+  .company-profile__details {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 15px 10px;
+  }
+
+  .company-picker {
+    width: 100%;
+  }
+
+  .company-picker select {
+    width: 100%;
+    max-width: none;
+  }
+
+  .history-chart {
+    height: 220px;
+  }
+}

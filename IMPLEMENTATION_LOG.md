@@ -2025,3 +2025,69 @@ Executed in the project virtual environment:
 - Vitest 4.1.12 declares Node 20, 22, or 24+ support; the available Node 23.5.0
   runtime is outside that declared engine range. The frontend test suite did
   run successfully in this environment, but an LTS Node version is recommended.
+
+## M10 Stage 2 — Companies page (company research workspace)
+
+**Status:** ✅ STAGE 2 COMPLETE
+**Date:** 2026-11-09
+
+### What was built
+
+- The Companies route now renders a real page instead of the foundation
+  shell: a company picker sourced from `GET /api/v1/companies`, a profile
+  panel (zero-padded CIK, fiscal-year-end month, record-updated date), a
+  calculated-metrics table with formula/inputs/accession provenance, a
+  Recharts metric-history line chart with a metric selector, a reported-facts
+  table with restatement context, and pagination for the metrics and facts
+  tables. This stage renders only API-backed values; no figures are mocked.
+- Added `frontend/src/api/companies.js` (`getCompany`, `getCompanyMetrics`,
+  `getCompanyMetricHistory`, `getCompanyFacts`) against the M9 companies
+  endpoints, with `AbortSignal` support and query parameters matching the
+  backend contracts (`metric`, `period_type`, `limit`, `offset`).
+- Extracted shared response validation from `overview.js` into
+  `frontend/src/api/validation.js` (page envelope plus company, metric, and
+  fact record validators) and re-exported it from `overview.js` for
+  compatibility. Malformed success responses still surface as an error state,
+  never as empty data.
+- Added the `useLoad` data hook: one `AbortController` per request, serialized
+  request keys so rapid ticker or metric switches never render stale results,
+  and status codes carried on the error state for honest handling of the
+  backend's filtered-empty 404 semantics.
+- Every panel has explicit loading, empty, and error states. Source links are
+  restricted to `https` hosts on `sec.gov`/`www.sec.gov` before rendering.
+- Two defects found during Stage 2 review against the live data volume and
+  fixed here:
+  1. The metrics table requested the unfiltered feed (974 rows per company →
+     49 pages ordered alphabetically by metric). Added a "Filter by metric"
+     selector that uses the backend's existing `metric` contract, resets
+     pagination on change, and renders an honest empty state when the filter
+     matches no stored observations (backend returns 404 for filtered-empty).
+  2. History is served oldest-first with a 100-row API cap while
+     `net_income_margin` already stores 92 observations. The chart now
+     discloses when `total` exceeds the fetched page instead of silently
+     omitting newer periods.
+- Added four tests: `metric`/`period_type` query-parameter contract, filter
+  wiring, filtered-404 empty state, and the history page-limit disclosure.
+
+### Verification
+
+- `npm test`: **38 passed across 6 test files** (baseline 34 + 4 new).
+- `npm run lint` (oxlint): passed with no findings.
+- Production build (`vite build`): passed; no errors.
+- Backend untouched; database checks during review were read-only SELECTs.
+
+### Limitations
+
+- The `metricNames` list in `CompaniesPage.jsx` duplicates the backend
+  `CalculatedMetricName` enum (13/13 in sync today). No backend endpoint
+  exposes the metric catalog, so drift is possible when a metric is added.
+- History cannot paginate beyond the API's 100-row page limit; the truncation
+  note is honest, but full history pagination is not implemented.
+- There is no `/companies/:ticker` deep-link; the page always opens on the
+  first company in the list.
+- Sub-panel error states (profile, metrics, history, facts) do not offer a
+  retry action yet; only the company-universe panel does.
+- The Evaluation page from the M10 spec is not built; evaluation work stays
+  deferred with M8.
+- App.jsx still selects the Companies element with a ternary; a route map
+  should replace it when more pages connect.

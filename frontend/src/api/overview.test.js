@@ -12,8 +12,8 @@ import {
   getTheses,
   getWatchlist,
   InvalidApiResponseError,
-  validatePageResponse,
 } from './overview.js'
+import { validatePageResponse } from './validation.js'
 
 const timestamp = '2026-10-31T12:00:00Z'
 const fixtures = {
