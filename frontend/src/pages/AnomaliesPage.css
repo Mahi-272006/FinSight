@@ -1,0 +1,146 @@
+.anomalies-page {
+  display: grid;
+  gap: 17px;
+}
+
+.anomaly-picker,
+.anomaly-filter {
+  display: grid;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.anomaly-picker select,
+.anomaly-filter select {
+  max-width: min(360px, 78vw);
+  min-height: 38px;
+  padding: 7px 34px 7px 10px;
+  color: var(--ink);
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  font-size: 11px;
+}
+
+.anomaly-filter {
+  width: fit-content;
+  margin: -3px 0 17px;
+}
+
+.anomaly-panel__intro {
+  max-width: 760px;
+  margin: -5px 0 15px;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.65;
+}
+
+.signal-row__period {
+  margin: 5px 0 0;
+  color: var(--quiet);
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.signal-row__explanation {
+  max-width: 780px;
+  margin: 7px 0 0;
+  color: #4b4c49;
+  font-size: 10px;
+  line-height: 1.65;
+}
+
+.signal-row__meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 8px 18px;
+  margin-top: 10px;
+}
+
+.signal-evidence {
+  min-width: 150px;
+  max-width: 320px;
+  color: #68727a;
+  font-size: 9px;
+}
+
+.signal-evidence summary {
+  cursor: pointer;
+}
+
+.signal-evidence pre {
+  display: block;
+  max-width: 100%;
+  overflow: auto;
+  margin-top: 8px;
+  color: #5a5d59;
+  font-family: var(--sans);
+  font-size: 9px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.signal-accessions {
+  max-width: 430px;
+  color: #6f716b;
+  font-family: var(--sans);
+  font-size: 9px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.anomaly-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  padding-top: 12px;
+  color: var(--muted);
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+}
+
+.anomaly-pagination button {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  place-items: center;
+  color: var(--accent);
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.anomaly-pagination button:disabled {
+  color: #b9bab5;
+  cursor: not-allowed;
+}
+
+.anomaly-picker select:focus-visible,
+.anomaly-filter select:focus-visible,
+.anomaly-pagination button:focus-visible,
+.signal-evidence summary:focus-visible {
+  outline: 2px solid #697782;
+  outline-offset: 2px;
+}
+
+@media (max-width: 760px) {
+  .anomaly-picker {
+    width: 100%;
+  }
+
+  .anomaly-picker select {
+    width: 100%;
+    max-width: none;
+  }
+
+  .signal-row__meta {
+    flex-direction: column;
+  }
+}

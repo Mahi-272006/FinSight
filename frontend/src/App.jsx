@@ -3,6 +3,7 @@ import AppShell from './components/AppShell.jsx'
 import OverviewPage from './pages/OverviewPage.jsx'
 import SectionPage from './pages/SectionPage.jsx'
 import CompaniesPage from './pages/CompaniesPage.jsx'
+import AnomaliesPage from './pages/AnomaliesPage.jsx'
 import './App.css'
 
 const sections = [
@@ -14,19 +15,29 @@ const sections = [
   { path: 'watchlist', title: 'Watchlist', description: 'The companies you are keeping under review.' },
 ]
 
+// Pages connected to real API data; every other section renders its
+// honest foundation shell until its own stage lands.
+const pageBySection = {
+  companies: CompaniesPage,
+  anomalies: AnomaliesPage,
+}
+
 function App() {
   return (
     <BrowserRouter>
       <Routes>
         <Route element={<AppShell />}>
           <Route index element={<OverviewPage />} />
-          {sections.map((section) => (
-            <Route
-              key={section.path}
-              path={section.path}
-              element={section.path === 'companies' ? <CompaniesPage /> : <SectionPage {...section} />}
-            />
-          ))}
+          {sections.map((section) => {
+            const Page = pageBySection[section.path]
+            return (
+              <Route
+                key={section.path}
+                path={section.path}
+                element={Page ? <Page /> : <SectionPage {...section} />}
+              />
+            )
+          })}
           <Route path="*" element={<Navigate to="/" replace />} />
         </Route>
       </Routes>

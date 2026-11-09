@@ -2091,3 +2091,66 @@ Executed in the project virtual environment:
   deferred with M8.
 - App.jsx still selects the Companies element with a ternary; a route map
   should replace it when more pages connect.
+
+## M10 Stage 3 — Anomalies page (investigation signal register)
+
+**Status:** ✅ STAGE 3 COMPLETE
+**Date:** 2026-11-09
+
+### What was built
+
+- The Anomalies route now renders a read-only signal register instead of the
+  foundation shell: a company picker from `GET /api/v1/companies`, a
+  signal-type filter (the four backend `SignalType` values), pagination, and
+  per-signal rows that reuse the Stage 1 `.signal-list`/`.signal-row` design
+  system: severity badge (`elevated`/`high`), headline, signal type, fiscal
+  period with period type, detected date, the backend's explanation text
+  rendered verbatim (it already carries the "not a finding" framing), an
+  Evidence disclosure showing the exact stored evidence JSON, and source
+  accession references. Every value comes from the API; no data is mocked.
+- Added `frontend/src/api/anomalies.js` (`getAnomalySignals`) against
+  `GET /api/v1/anomalies/{ticker}`: strictly read-only, `AbortSignal`
+  support, `signal_type` query mapping, and shared page-envelope/record
+  validation. No recompute UI was added; `POST /anomalies/recompute`
+  remains intentionally unexposed.
+- The backend's two distinct 404 contracts are handled separately: an
+  unfiltered 404 (unknown ticker) renders an API error with a working
+  "Try again" retry, while a filtered 404 (filter matches zero stored rows)
+  renders the friendly "No signals of this type" empty state.
+- Extracted the Stage 2 `useLoad` hook into `frontend/src/hooks/useLoad.js`
+  so Companies and Anomalies share one stale-request implementation (one
+  abort per request, serialized keys gate stale data, `statusCode` carried
+  for 404 disambiguation). `CompaniesPage` now imports it; its behavior and
+  tests are unchanged.
+- Replaced the `App.jsx` ternary with a route map (`pageBySection`) that now
+  serves Companies and Anomalies as real pages; every other route still
+  renders its honest foundation shell.
+- Added 23 tests: the anomalies API contract (paths, `signal_type` mapping,
+  malformed rejection); the `useLoad` hook (ready transition, stale-key
+  gating, static error mapping, status-code carriage, unmount and key-change
+  aborts, canceled-error silence); the Anomalies page (full row rendering,
+  unfiltered empty, filtered-404 empty, unfiltered-404 error with retry
+  recovery, secret-free error text, filter wiring with offset reset, company
+  switch with abort); and App routing (index, Companies, Anomalies, shells,
+  unknown-route redirect).
+
+### Verification
+
+- `npm test`: **61 passed across 10 test files** (baseline 38 + 23 new).
+- `npm run lint` (oxlint): passed with no findings.
+- Production build (`vite build`): passed; no errors.
+- Backend untouched; no database writes.
+
+### Limitations
+
+- The signal-type filter options hardcode the backend `SignalType` enum
+  (4/4 in sync today); no endpoint exposes the catalog.
+- Filtered-empty and unknown-ticker are both 404 by contract; the page
+  disambiguates by whether a filter is active, which is exact for every
+  picker-validated ticker.
+- Signals are per-company only; there is no cross-company register and no
+  severity filter yet.
+- The register is read-only by design; recomputation stays a deliberate
+  backend-only workflow until a later stage approves exposing it.
+- `AnomaliesPage` keeps a page-local pagination helper (a small copy of the
+  Companies one) rather than introducing a shared module this stage.

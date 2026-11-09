@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useState } from 'react'
 import {
   CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from 'recharts'
@@ -7,7 +7,7 @@ import {
   getCompany, getCompanyFacts, getCompanyMetricHistory, getCompanyMetrics,
 } from '../api/companies.js'
 import { getCompanies } from '../api/overview.js'
-import { getApiErrorMessage, isRequestCanceled } from '../api/client.js'
+import { useLoad } from '../hooks/useLoad.js'
 import { DataTable, EmptyState, ErrorState, LoadingState, PageIntro, Panel } from '../components/ui.jsx'
 import './CompaniesPage.css'
 
@@ -80,29 +80,6 @@ function safeSourceUrl(value) {
   } catch {
     return null
   }
-}
-
-function useLoad(loader, dependencies) {
-  const [state, setState] = useState({ key: null, status: 'loading', data: null, error: '' })
-  const loaderRef = useRef(loader)
-  loaderRef.current = loader
-  const key = JSON.stringify(dependencies)
-  useEffect(() => {
-    const controller = new AbortController()
-    loaderRef.current(controller.signal)
-      .then((data) => {
-        if (!controller.signal.aborted) setState({ key, status: 'ready', data, error: '', statusCode: null })
-      })
-      .catch((error) => {
-        if (!controller.signal.aborted && !isRequestCanceled(error)) {
-          setState({ key, status: 'error', data: null, error: getApiErrorMessage(error), statusCode: error?.response?.status })
-        }
-      })
-    return () => controller.abort()
-    // The serialized request key is the explicit set of loader inputs.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [key])
-  return state.key === key ? state : { status: 'loading', data: null, error: '', statusCode: null }
 }
 
 function CompaniesPage() {
