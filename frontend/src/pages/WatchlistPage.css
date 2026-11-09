@@ -1,0 +1,225 @@
+/* WatchlistPage.css — Watchlist page styles.
+ *
+ * Follows the established FinSight pattern:
+ *   - Page root uses display:grid with a consistent gap.
+ *   - Pagination is identical in shape to company-pagination / reports-pagination.
+ *   - Table font sizes (td: 10px, th: 9px) match other FinSight tables.
+ *   - Form field uses the same label+control stack as CompaniesPage.
+ *   - Error messages use --negative and 9px text.
+ *   - Remove button is a 30×30 icon button (matches condition-row__remove in ThesisPage).
+ *   - Focus outlines: 2px solid #697782 (consistent app-wide).
+ */
+
+/* ---------------------------------------------------------------------------
+ * Page root
+ * --------------------------------------------------------------------------- */
+
+.watchlist-page {
+  display: grid;
+  gap: 17px;
+}
+
+/* ---------------------------------------------------------------------------
+ * Add-company form
+ * --------------------------------------------------------------------------- */
+
+.watchlist-add-form {
+  display: grid;
+  gap: 15px;
+  max-width: 480px;
+}
+
+/* Label + control stack — mirrors .company-picker */
+.watchlist-field {
+  display: grid;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.watchlist-field select {
+  max-width: min(400px, 90vw);
+  min-height: 38px;
+  padding: 7px 34px 7px 10px;
+  color: var(--ink);
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  font-size: 11px;
+}
+
+.watchlist-field select:focus-visible {
+  outline: 2px solid #697782;
+  outline-offset: 2px;
+}
+
+/* Inline error below an individual field or the whole form */
+.watchlist-field__error {
+  margin: 0;
+  color: var(--negative);
+  font-size: 9px;
+  font-weight: 600;
+  line-height: 1.5;
+}
+
+.watchlist-form__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+/* ---------------------------------------------------------------------------
+ * Watchlist table
+ * --------------------------------------------------------------------------- */
+
+.watchlist-table th {
+  padding-block: 9px;
+  font-size: 9px;
+}
+
+.watchlist-table td {
+  height: auto;
+  padding-block: 10px;
+  color: #555752;
+  font-size: 10px;
+  vertical-align: middle;
+}
+
+/* Ticker cell is visually prominent — Option A */
+.watchlist-row__ticker {
+  color: #2d3038;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+}
+
+/* CIK in secondary style */
+.watchlist-row__cik {
+  color: #6f716b;
+  font-family: var(--sans);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.watchlist-row__date {
+  color: #858783;
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+/* Action cell keeps the remove button right-aligned */
+.watchlist-row__action {
+  width: 44px;
+  text-align: right;
+}
+
+/* Row-level remove error (spans full width below the row) */
+.watchlist-row-error td {
+  padding-block: 0 8px;
+}
+
+/* ---------------------------------------------------------------------------
+ * Remove button — 30×30 icon button
+ * --------------------------------------------------------------------------- */
+
+.watchlist-remove-btn {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  place-items: center;
+  color: var(--negative);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background 100ms ease, border-color 100ms ease;
+}
+
+.watchlist-remove-btn:hover:not(:disabled) {
+  background: #fff1f0;
+  border-color: #f5c0bc;
+}
+
+.watchlist-remove-btn:disabled {
+  color: #b9bab5;
+  cursor: not-allowed;
+}
+
+.watchlist-remove-btn:focus-visible {
+  outline: 2px solid #697782;
+  outline-offset: 2px;
+}
+
+/* ---------------------------------------------------------------------------
+ * Pagination — identical shape to .company-pagination
+ * --------------------------------------------------------------------------- */
+
+.watchlist-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  padding-top: 12px;
+  color: var(--muted);
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+}
+
+.watchlist-pagination button {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  place-items: center;
+  color: var(--accent);
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.watchlist-pagination button:disabled {
+  color: #b9bab5;
+  cursor: not-allowed;
+}
+
+.watchlist-pagination button:focus-visible {
+  outline: 2px solid #697782;
+  outline-offset: 2px;
+}
+
+/* ---------------------------------------------------------------------------
+ * Screen-reader-only utility (matches existing pattern in the app)
+ * --------------------------------------------------------------------------- */
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ---------------------------------------------------------------------------
+ * Responsive adjustments
+ * --------------------------------------------------------------------------- */
+
+@media (max-width: 760px) {
+  .watchlist-add-form {
+    max-width: 100%;
+  }
+
+  .watchlist-field select {
+    width: 100%;
+    max-width: none;
+  }
+
+  .watchlist-form__actions {
+    flex-direction: column;
+  }
+}

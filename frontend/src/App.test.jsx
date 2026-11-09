@@ -7,6 +7,7 @@ vi.mock('./pages/AnomaliesPage.jsx', () => ({ default: () => <div data-testid="a
 vi.mock('./pages/ThesisPage.jsx', () => ({ default: () => <div data-testid="thesis-page" /> }))
 vi.mock('./pages/ResearchPage.jsx', () => ({ default: () => <div data-testid="research-page" /> }))
 vi.mock('./pages/ReportsPage.jsx', () => ({ default: () => <div data-testid="reports-page" /> }))
+vi.mock('./pages/WatchlistPage.jsx', () => ({ default: () => <div data-testid="watchlist-page" /> }))
 vi.mock('./pages/SectionPage.jsx', () => ({ default: ({ title }) => <div data-testid="section-page">{title}</div> }))
 
 import App from './App.jsx'
@@ -59,10 +60,11 @@ describe('App routing', () => {
     expect(screen.queryByTestId('section-page')).toBeNull()
   })
 
-  it('renders a foundation shell for the watchlist route', () => {
+  it('renders the Watchlist page for /watchlist', () => {
     window.history.pushState({}, '', '/watchlist')
     render(<App />)
-    expect(screen.getByTestId('section-page').textContent).toBe('Watchlist')
+    expect(screen.getByTestId('watchlist-page')).toBeTruthy()
+    expect(screen.queryByTestId('section-page')).toBeNull()
   })
 
   it('redirects unknown routes to the overview', () => {
