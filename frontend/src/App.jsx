@@ -4,6 +4,7 @@ import OverviewPage from './pages/OverviewPage.jsx'
 import SectionPage from './pages/SectionPage.jsx'
 import CompaniesPage from './pages/CompaniesPage.jsx'
 import AnomaliesPage from './pages/AnomaliesPage.jsx'
+import ThesisPage from './pages/ThesisPage.jsx'
 import './App.css'
 
 const sections = [
@@ -20,6 +21,7 @@ const sections = [
 const pageBySection = {
   companies: CompaniesPage,
   anomalies: AnomaliesPage,
+  thesis: ThesisPage,
 }
 
 function App() {

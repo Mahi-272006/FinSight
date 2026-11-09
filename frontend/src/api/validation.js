@@ -59,6 +59,95 @@ const factRecord = (item) => isRecord(item)
   && isNullableFiniteNumber(item.value_original)
   && isDateString(item.created_at)
 
+// Thesis detail: conditions carry creation-time evidence snapshots and
+// assessments carry append-only per-condition summaries with provenance.
+const signalContextRecord = (item) => isRecord(item)
+  && isString(item.signal_type)
+  && isString(item.severity)
+  && isString(item.period)
+  && isString(item.headline)
+  && isString(item.explanation)
+
+const conditionEvaluationRecord = (item) => isRecord(item)
+  && (item.condition_id === null || isPositiveInteger(item.condition_id))
+  && isString(item.description)
+  && isString(item.metric)
+  && isString(item.comparator)
+  && isFiniteNumber(item.threshold)
+  && isString(item.verdict)
+  && isNullableFiniteNumber(item.value)
+  && (item.unit === null || isString(item.unit))
+  && (item.tier === null || isString(item.tier))
+  && (item.fiscal_year === null || Number.isInteger(item.fiscal_year))
+  && (item.fiscal_period === null || isString(item.fiscal_period))
+  && (item.formula === null || isString(item.formula))
+  && Array.isArray(item.accessions)
+  && item.accessions.every(isString)
+  && isString(item.reason)
+
+const creationEvidenceRecord = (item) => isRecord(item)
+  && isString(item.metric)
+  && isString(item.comparator)
+  && isFiniteNumber(item.threshold)
+  && isDateString(item.captured_at)
+  && (item.value === null || isFiniteNumber(item.value))
+  // A null value records "the metric did not exist yet" and carries no
+  // unit/tier/period/formula/accessions keys at all.
+  && (item.value === null || (
+    isString(item.unit)
+    && isString(item.tier)
+    && isString(item.period)
+    && (item.formula === null || isString(item.formula))
+    && Array.isArray(item.accessions)
+    && item.accessions.every(isString)
+  ))
+
+const assessmentRecord = (item) => isRecord(item)
+  && isPositiveInteger(item.id)
+  && isDateString(item.assessed_at)
+  && isString(item.status)
+  && (item.status_changed_from === null || isString(item.status_changed_from))
+  && Array.isArray(item.summary)
+  && item.summary.every(conditionEvaluationRecord)
+  && isString(item.explanation)
+  && isString(item.explanation_source)
+  && Array.isArray(item.signals)
+  && item.signals.every(signalContextRecord)
+
+const thesisConditionRecord = (item) => isRecord(item)
+  && isPositiveInteger(item.id)
+  && isString(item.description)
+  && isString(item.metric)
+  && isString(item.comparator)
+  && isFiniteNumber(item.threshold)
+  && (item.fiscal_year === null || Number.isInteger(item.fiscal_year))
+  && (item.fiscal_period === null || isString(item.fiscal_period))
+  && creationEvidenceRecord(item.creation_evidence)
+
+const thesisRecord = (item) => isRecord(item)
+  && isPositiveInteger(item.id)
+  && isString(item.ticker)
+  && isString(item.statement)
+  && isString(item.horizon)
+  && isString(item.status)
+  && isDateString(item.created_at)
+  && Array.isArray(item.conditions)
+  && item.conditions.every(thesisConditionRecord)
+  && Array.isArray(item.assessments)
+  && item.assessments.every(assessmentRecord)
+
+const assessmentResultRecord = (item) => isRecord(item)
+  && isPositiveInteger(item.assessment_id)
+  && isPositiveInteger(item.thesis_id)
+  && isString(item.status)
+  && (item.status_changed_from === null || isString(item.status_changed_from))
+  && Array.isArray(item.evaluations)
+  && item.evaluations.every(conditionEvaluationRecord)
+  && isString(item.explanation)
+  && isString(item.explanation_source)
+  && Array.isArray(item.signals_context)
+  && item.signals_context.every(signalContextRecord)
+
 const validators = {
   companies: companyRecord,
   company: companyRecord,
@@ -80,6 +169,9 @@ const validators = {
     && isString(item.horizon)
     && isString(item.status)
     && isDateString(item.created_at),
+  thesis: thesisRecord,
+  assessment: assessmentRecord,
+  assessmentResult: assessmentResultRecord,
   anomalies: (item) => isRecord(item)
     && isPositiveInteger(item.id)
     && isPositiveInteger(item.cik)

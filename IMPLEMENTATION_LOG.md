@@ -2154,3 +2154,78 @@ Executed in the project virtual environment:
   backend-only workflow until a later stage approves exposing it.
 - `AnomaliesPage` keeps a page-local pagination helper (a small copy of the
   Companies one) rather than introducing a shared module this stage.
+
+## M10 Stage 4 — Thesis page (master-detail workflows)
+
+**Status:** ✅ STAGE 4 COMPLETE
+**Date:** 2026-11-09
+
+### What was built
+
+- The Thesis route now renders a master-detail workspace instead of the
+  foundation shell: a paginated register of theses (`GET /api/v1/theses`) on
+  the left, and a selected-thesis detail column driven by
+  `GET /api/v1/theses/{id}` (statement, conditions with creation-time
+  evidence snapshots, latest-assessment block) plus the paginated
+  append-only timeline from `GET /api/v1/theses/{id}/assessments`.
+- Deterministic status is the authoritative display everywhere: status
+  badges (Supported / Weakened / Contradicted / Insufficient evidence /
+  Unassessed) come from API data only, and every explanation is labelled by
+  provenance with a source badge — "Deterministic summary" for
+  `deterministic:condition-counts` and "LLM interpretation · provider/model"
+  for `llm:` sources — with an explicit caption that LLM wording never
+  determines the status. Transitions (`status_changed_from` → status) show
+  on the latest assessment and each history row.
+- Explicit "Assess now" action (`POST /api/v1/theses/{id}/assess`):
+  `interpret` defaults to false with an opt-in checkbox for LLM
+  interpretation; on success the page refreshes detail and history so the
+  appended row appears in the timeline; failures surface only sanitized
+  messages. Investigation signals render in a clearly labelled
+  "context only" panel and per-row context notes — they never influence
+  the displayed status.
+- Creation workflow (`POST /api/v1/theses`): inline form with company
+  picker (`GET /companies`), statement, horizon, add/remove free-text
+  condition rows with client-side syntax validation mirroring the backend
+  regex (the backend remains the authority; 400/422 map to safe static
+  messages), optional fiscal year/period, and metric-name suggestions from
+  `GET /companies/{ticker}/metrics` via a `<datalist>`. Successful
+  creation refreshes the register, selects the new thesis, and never
+  assesses it — a new thesis starts "Unassessed".
+- Evidence separation: condition cards show the immutable creation snapshot
+  (value, unit, tier, period, formula, accessions, captured_at — or an
+  explicit "no rows at creation"), while history rows show assessment-time
+  evaluations (verdict, value, unit, tier, evaluated period, formula,
+  accessions, reason).
+- Extended `validation.js` additively with `thesis`, `assessment`, and
+  `assessmentResult` record validators covering conditions, snapshots,
+  summaries, signals context, and transitions.
+- Added 19 tests: 6 API contract tests (paths, params, payload
+  passthrough, interpret default, malformed rejection across every new
+  validator), 12 page tests (register/detail/history rendering incl.
+  provenance and transitions, empty states, list error + retry, detail 404
+  + retry, assess default/opt-in/failure, creation payload + refresh + no
+  auto-assess, client syntax validation, backend 400 safety, history
+  pagination, selection-switch abort), and 1 routing test (`/thesis` →
+  ThesisPage; foundation-shell coverage moved to `/research`).
+
+### Verification
+
+- `npm test`: **80 passed across 12 test files** (baseline 61 + 19 new).
+- `npm run lint` (oxlint): passed with no findings.
+- Production build (`vite build`): passed; no errors.
+- Backend untouched; no database writes.
+
+### Limitations
+
+- The backend deliberately has no edit/delete thesis workflow (conditions
+  immutable, assessments append-only); none was invented in the UI.
+- Metric suggestions read the first 100 stored metrics for the selected
+  company (the endpoint's page limit); free-text condition entry works
+  regardless.
+- Register and history use page-local pagination helpers (copies of the
+  Companies/Anomalies ones), not a shared module.
+- Assessment timestamps render in UTC so a stored instant reads the same
+  everywhere.
+- The detail endpoint's embedded assessment list feeds only the
+  latest-assessment block; the timeline always reads the paginated history
+  endpoint, per the approved design.

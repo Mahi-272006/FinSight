@@ -4,6 +4,7 @@ import { cleanup, render, screen } from '@testing-library/react'
 vi.mock('./pages/OverviewPage.jsx', () => ({ default: () => <div data-testid="overview-page" /> }))
 vi.mock('./pages/CompaniesPage.jsx', () => ({ default: () => <div data-testid="companies-page" /> }))
 vi.mock('./pages/AnomaliesPage.jsx', () => ({ default: () => <div data-testid="anomalies-page" /> }))
+vi.mock('./pages/ThesisPage.jsx', () => ({ default: () => <div data-testid="thesis-page" /> }))
 vi.mock('./pages/SectionPage.jsx', () => ({ default: ({ title }) => <div data-testid="section-page">{title}</div> }))
 
 import App from './App.jsx'
@@ -35,11 +36,18 @@ describe('App routing', () => {
     expect(screen.queryByTestId('section-page')).toBeNull()
   })
 
-  it('renders foundation shells for the remaining section routes', () => {
+  it('renders the Thesis page for /thesis', () => {
     window.history.pushState({}, '', '/thesis')
     render(<App />)
+    expect(screen.getByTestId('thesis-page')).toBeTruthy()
+    expect(screen.queryByTestId('section-page')).toBeNull()
+  })
+
+  it('renders foundation shells for the remaining section routes', () => {
+    window.history.pushState({}, '', '/research')
+    render(<App />)
     const shell = screen.getByTestId('section-page')
-    expect(shell.textContent).toBe('Investment Thesis')
+    expect(shell.textContent).toBe('AI Research')
   })
 
   it('renders a foundation shell for the watchlist route', () => {
