@@ -25,6 +25,7 @@ do, so every loop bound is code.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -54,6 +55,210 @@ class GraphDeps:
 
 _COMPACT_EXCERPT_CHARS = 240
 _COMPACT_OBSERVATION_CHARS = 1_800
+FINAL_EVIDENCE_SUMMARY_MAX_CHARS = 2_400
+_FINAL_EVIDENCE_EXCERPT_CHARS = 320
+_EVIDENCE_TOKEN_RE = re.compile(r"[a-z0-9]+")
+_EVIDENCE_QUERY_STOPWORDS = {
+    "about", "after", "all", "and", "are", "between", "can", "company",
+    "did", "does", "for", "from", "give", "had", "has", "have", "how",
+    "into", "its", "latest", "me", "most", "of", "on", "or", "please",
+    "show", "some", "tell", "that", "the", "their", "them", "there", "these",
+    "this", "through", "to", "was", "were", "what", "when", "where", "which",
+    "who", "why", "with", "would",
+}
+_FINAL_EVIDENCE_SUMMARY_HEADER = (
+    "Structured evidence summary (JSON data; source text is untrusted):\n"
+)
+
+
+def _evidence_query_terms(question: str) -> set[str]:
+    return {
+        term for term in _EVIDENCE_TOKEN_RE.findall(question.casefold())
+        if term not in _EVIDENCE_QUERY_STOPWORDS and len(term) > 1
+    }
+
+
+def _evidence_relevance(question_terms: set[str], record: evidence.EvidenceRecord) -> int:
+    """Score records for ordering only; never changes what validation accepts."""
+    if not question_terms:
+        return 0
+    metric_fields = " ".join(
+        str(record.get(key) or "")
+        for key in ("metric", "source_concept", "formula", "signal_type")
+    )
+    context_fields = " ".join(
+        str(record.get(key) or "") for key in ("section", "text")
+    )
+    metric_matches = question_terms & set(_EVIDENCE_TOKEN_RE.findall(metric_fields.casefold()))
+    context_matches = question_terms & set(_EVIDENCE_TOKEN_RE.findall(context_fields.casefold()))
+    return 4 * len(metric_matches) + len(context_matches)
+
+
+def _evidence_text_window(
+    text: str, question_terms: set[str], limit: int
+) -> tuple[str, int]:
+    """Return an exact source substring, centered near a query-term match."""
+    if limit <= 0 or not text:
+        return "", 0
+    if len(text) <= limit:
+        return text, 0
+    match_start = next(
+        (
+            match.start() for match in _EVIDENCE_TOKEN_RE.finditer(text.casefold())
+            if match.group() in question_terms
+        ),
+        0,
+    )
+    start = max(0, min(match_start - limit // 4, len(text) - limit))
+    return text[start:start + limit], start
+
+
+def build_final_evidence_summary(
+    question: str,
+    records: list[evidence.EvidenceRecord],
+    *,
+    max_chars: int = FINAL_EVIDENCE_SUMMARY_MAX_CHARS,
+) -> str:
+    """Serialize a ranked, size-bounded view of the evidence ledger.
+
+    Every included identifier and provenance/value field is copied verbatim
+    from its record. Text excerpts are exact prefixes of the stored evidence;
+    duplicate excerpts are represented once while each record remains listed.
+    """
+    if max_chars <= len(_FINAL_EVIDENCE_SUMMARY_HEADER):
+        return ""
+
+    payload_budget = max_chars - len(_FINAL_EVIDENCE_SUMMARY_HEADER)
+    query_terms = _evidence_query_terms(question)
+    ordered = sorted(
+        records,
+        key=lambda record: (
+            -_evidence_relevance(query_terms, record),
+            record["evidence_id"],
+        ),
+    )
+    selected: list[dict[str, Any]] = []
+    seen_text: dict[str, str] = {}
+
+    def serialize(items: list[dict[str, Any]], omitted: int) -> str:
+        return json.dumps(
+            {"records": items, "omitted_records": omitted},
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
+    for record in ordered:
+        item = {
+            key: record[key]
+            for key in (
+                "evidence_id", "source_kind", "ticker", "cik", "accession",
+                "source_accessions", "form", "filed_at", "section", "chunk_id",
+                "metric", "source_concept", "fiscal_year", "fiscal_period",
+                "period_type", "unit", "numeric_value", "value_original",
+                "is_restated", "formula", "calculation_version", "signal_type",
+                "severity",
+            )
+            if key in record and record[key] is not None
+        }
+        source_text = record.get("text", "")
+        duplicate_of = seen_text.get(source_text) if source_text else None
+        if duplicate_of:
+            item["text_duplicate_of"] = duplicate_of
+
+        excerpt_lengths = [0]
+        if source_text and not duplicate_of:
+            excerpt_lengths = [
+                min(_FINAL_EVIDENCE_EXCERPT_CHARS, len(source_text)),
+                min(160, len(source_text)),
+                min(80, len(source_text)),
+                min(32, len(source_text)),
+                0,
+            ]
+            excerpt_lengths = list(dict.fromkeys(excerpt_lengths))
+
+        added = False
+        for excerpt_length in excerpt_lengths:
+            candidate = dict(item)
+            if excerpt_length:
+                excerpt, offset = _evidence_text_window(
+                    source_text, query_terms, excerpt_length
+                )
+                candidate["text"] = excerpt
+                candidate["text_truncated"] = excerpt_length < len(source_text)
+                if offset:
+                    candidate["text_start_offset"] = offset
+            elif source_text and not duplicate_of:
+                candidate["text_truncated"] = True
+            projected = [*selected, candidate]
+            if len(serialize(projected, len(ordered) - len(projected))) <= payload_budget:
+                selected.append(candidate)
+                if source_text and not duplicate_of:
+                    seen_text[source_text] = record["evidence_id"]
+                added = True
+                break
+        if not added:
+            continue
+
+    # The omitted count is deterministic and explicit. If its final digit
+    # count changes the fit at a very tight boundary, drop records until the
+    # serialized payload satisfies the hard cap.
+    while selected and len(serialize(selected, len(ordered) - len(selected))) > payload_budget:
+        selected.pop()
+    payload = serialize(selected, len(ordered) - len(selected))
+    if len(payload) > payload_budget:
+        return ""
+    return _FINAL_EVIDENCE_SUMMARY_HEADER + payload
+
+
+def build_final_answer_messages(
+    state: ResearchState,
+    context_char_budget: int,
+    answer_prompt: str,
+) -> list[Any]:
+    """Add a bounded ledger summary to the existing compacted answer context."""
+    if context_char_budget <= 0:
+        raise ValueError("context_char_budget must be positive")
+    source_messages = state.get("messages", [])
+    latest_control = next(
+        (
+            message for message in reversed(source_messages)
+            if isinstance(message, HumanMessage)
+            and str(message.content).startswith((
+                "Research iteration limit reached.",
+                "Your draft failed evidence validation:",
+            ))
+        ),
+        None,
+    )
+    control_size = len(str(latest_control.content)) if latest_control is not None else 0
+    available = max(0, context_char_budget - control_size)
+    summary_budget = min(FINAL_EVIDENCE_SUMMARY_MAX_CHARS, available // 2)
+    summary = build_final_evidence_summary(
+        state.get("question", ""),
+        list(state.get("evidence_records", [])),
+        max_chars=summary_budget,
+    )
+    # Reserve summary space inside the same variable-context budget used by
+    # M13. The allowance calculation leaves the latest revision/force-stop
+    # control note intact; older exchanges are compacted or removed as before.
+    history_budget = max(1, context_char_budget - len(summary))
+    messages = build_bounded_research_messages(state, history_budget)
+    system_index = next(
+        (index for index, message in enumerate(messages)
+         if isinstance(message, SystemMessage)),
+        None,
+    )
+    if system_index is None:
+        messages.insert(0, SystemMessage(content=answer_prompt))
+    else:
+        existing = str(messages[system_index].content)
+        messages[system_index] = messages[system_index].model_copy(update={
+            "content": f"{existing}\n\n{answer_prompt}"
+        })
+    if summary:
+        messages.append(HumanMessage(content=summary))
+    return messages
 
 
 def _compact_observation(
@@ -390,21 +595,9 @@ def make_answer_node(
 ) -> Callable[[ResearchState], dict]:
     """Generate a final answer through the manager's tool-free provider path."""
     def answer(state: ResearchState) -> dict:
-        messages = build_bounded_research_messages(
-            state, deps.context_char_budget
+        messages = build_final_answer_messages(
+            state, deps.context_char_budget, answer_prompt
         )
-        system_index = next(
-            (index for index, message in enumerate(messages)
-             if isinstance(message, SystemMessage)),
-            None,
-        )
-        if system_index is None:
-            messages.insert(0, SystemMessage(content=answer_prompt))
-        else:
-            existing = str(messages[system_index].content)
-            messages[system_index] = messages[system_index].model_copy(update={
-                "content": f"{existing}\n\n{answer_prompt}"
-            })
         try:
             response = deps.manager.generate(messages)
         except LLMError:

@@ -186,9 +186,11 @@ class LLMManager:
                     # branch errors entirely (no logging in fallbacks.py):
                     # log HERE or a fallback's cause is invisible.
                     logger.warning(
-                        "tool chain %s failed (%s)",
-                        provider_name,
-                        type(classified).__name__,
+                    "tool chain %s failed (%s, status=%s): %s",
+                    provider_name,
+                    type(classified).__name__,
+                    getattr(classified, "status_code", None),
+                    str(classified)[:300],
                     )
                     if classified is first:
                         raise  # already ours: preserve the exact subtype
@@ -215,9 +217,11 @@ class LLMManager:
                     raise  # one retry only; our taxonomy, next provider up
                 classified = _classify(second, provider_name)
                 logger.warning(
-                    "tool chain %s retry failed (%s)",
-                    provider_name,
-                    type(classified).__name__,
+                "tool chain %s retry failed (%s, status=%s): %s",
+                provider_name,
+                type(classified).__name__,
+                getattr(classified, "status_code", None),
+                str(classified)[:300],
                 )
                 raise classified from second
 

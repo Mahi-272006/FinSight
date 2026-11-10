@@ -9,16 +9,22 @@ capture, validation gating, limitation reporting.
 
 import json
 from dataclasses import asdict
+from datetime import datetime, timezone
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from app.database.models import Base, Company
+from app.database.models import Base, Company, FinancialFact
 from app.graph import evidence
 from app.graph.agent import ResearchAgent
-from app.graph.nodes import GraphDeps, make_execute_tools_node
+from app.graph.nodes import (
+    FINAL_EVIDENCE_SUMMARY_MAX_CHARS,
+    GraphDeps,
+    build_final_evidence_summary,
+    make_execute_tools_node,
+)
 from app.graph.tools import make_search_filing_sections
 from app.services.vector_store import SearchHit
 from app.config import Settings
@@ -165,6 +171,15 @@ def make_agent(script, session_factory, *, settings=None, hits=None, answer_scri
     return agent, manager
 
 
+def answer_evidence_summary(messages):
+    summary_message = next(
+        message for message in messages
+        if isinstance(message, HumanMessage)
+        and message.content.startswith("Structured evidence summary ")
+    )
+    return summary_message.content, json.loads(summary_message.content.split("\n", 1)[1])
+
+
 # ---------------------------------------------------------------------------
 # Loop scenarios
 # ---------------------------------------------------------------------------
@@ -186,6 +201,17 @@ class TestHappyPath:
         assert len(manager.answer_calls) == 1  # final JSON uses manager.generate, not the tool runnable
         assert "FINAL ANSWER MODE" in manager.answer_calls[0][0].content
         assert "no Markdown" in manager.answer_calls[0][0].content
+        summary_text, summary = answer_evidence_summary(manager.answer_calls[0])
+        summary_record = next(
+            record for record in summary["records"]
+            if record["evidence_id"] == FILING_EVIDENCE_ID
+        )
+        assert len(summary_text) <= FINAL_EVIDENCE_SUMMARY_MAX_CHARS
+        assert summary_record["accession"] == ACCESSION
+        assert summary_record["filed_at"] == "2026-08-26"
+        assert summary_record["section"] == "financial_statements"
+        assert summary_record["chunk_id"] == f"{ACCESSION}:3"
+        assert GOOD_QUOTE in summary_record["text"]
         assert result.limitations == []
         # The audit trail: resolve + tool + validation + finalize.
         assert any(line.startswith("resolve: NVIDIA") for line in result.trace)
@@ -203,6 +229,108 @@ class TestHappyPath:
             "question", "ticker", "company", "final_answer", "citations",
             "limitations", "trace", "validation", "iterations", "revises", "tool_calls",
         }
+
+    def test_final_summary_ranks_and_preserves_financial_fact_provenance(self, session_factory):
+        question = "What was NVDA revenue for fiscal 2026 Q2?"
+        with session_factory() as session:
+            session.add(FinancialFact(
+                cik=1045810,
+                metric="revenue",
+                value=REVENUE,
+                unit="USD",
+                period_type="quarterly",
+                fiscal_year=2026,
+                fiscal_period="Q2",
+                source_concept="RevenueFromContractWithCustomerExcludingAssessedTax",
+                form="10-Q",
+                accession_number=ACCESSION,
+                filed_at=datetime(2026, 8, 26, tzinfo=timezone.utc),
+            ))
+            session.commit()
+        agent, manager = make_agent(
+            [tool_call(
+                "get_financial_facts",
+                {"ticker": "NVDA", "metric": "revenue", "fiscal_year": 2026},
+            )],
+            session_factory,
+            answer_script=['{"claims":[]}', '{"claims":[]}'],
+        )
+
+        agent.run(question, "NVDA")
+
+        for prompt in manager.answer_calls:
+            assert any(
+                isinstance(message, HumanMessage) and message.content == question
+                for message in prompt
+            )
+        summary_text, summary = answer_evidence_summary(manager.answer_calls[0])
+        expected_id = evidence.build_financial_evidence_id(
+            "financial_fact",
+            ticker="NVDA",
+            cik=1045810,
+            accession=ACCESSION,
+            metric="revenue",
+            source_concept="RevenueFromContractWithCustomerExcludingAssessedTax",
+            fiscal_year=2026,
+            fiscal_period="Q2",
+            period_type="quarterly",
+            unit="USD",
+        )
+        record = next(row for row in summary["records"] if row["evidence_id"] == expected_id)
+        assert len(summary_text) <= FINAL_EVIDENCE_SUMMARY_MAX_CHARS
+        assert record["accession"] == ACCESSION
+        assert record["filed_at"] == "2026-08-26"
+        assert record["metric"] == "revenue"
+        assert record["source_concept"] == "RevenueFromContractWithCustomerExcludingAssessedTax"
+        assert record["fiscal_year"] == 2026
+        assert record["fiscal_period"] == "Q2"
+        assert record["period_type"] == "quarterly"
+        assert record["unit"] == "USD"
+        assert record["numeric_value"] == "46743000000.0"
+
+    def test_final_summary_is_relevance_ranked_and_strictly_bounded(self, session_factory):
+        source_record = make_search_filing_sections(
+            FakeStore([_hit()]), FakeEmbedder()
+        ).execute({"ticker": "NVDA", "query": "revenue"}).evidence_records[0]
+        records = []
+        for index in range(24):
+            chunk_id = f"{ACCESSION}:{index}"
+            records.append({
+                **source_record,
+                "evidence_id": evidence.build_filing_chunk_evidence_id(
+                    1045810, ACCESSION, chunk_id
+                ),
+                "chunk_id": chunk_id,
+                "text": f"Historical discussion of export controls. {index}. " * 20,
+            })
+        relevant = {
+            **records[0],
+            "evidence_id": evidence.build_filing_chunk_evidence_id(
+                1045810, ACCESSION, f"{ACCESSION}:revenue"
+            ),
+            "chunk_id": f"{ACCESSION}:revenue",
+            "text": (
+                ("Unrelated filing discussion. " * 24)
+                + "Revenue increased during the fiscal period. "
+                + ("Additional filing context. " * 12)
+            ),
+        }
+        records.append(relevant)
+
+        summary_text = build_final_evidence_summary(
+            "What happened to revenue?", records, max_chars=900
+        )
+        payload = json.loads(summary_text.split("\n", 1)[1])
+
+        assert len(summary_text) <= 900
+        assert payload["omitted_records"] > 0
+        assert payload["records"][0]["evidence_id"] == relevant["evidence_id"]
+        assert "Revenue increased" in payload["records"][0]["text"]
+        assert payload["records"][0]["text_start_offset"] > 0
+        assert all(
+            row["evidence_id"] in {record["evidence_id"] for record in records}
+            for row in payload["records"]
+        )
 
     def test_context_stays_bounded_and_ledger_survives_compaction(self, session_factory):
         long_hit = SearchHit(
@@ -248,15 +376,22 @@ class TestHappyPath:
             len(str(message.content))
             + (len(json.dumps(message.tool_calls)) if getattr(message, "tool_calls", None) else 0)
             for message in final_prompt
-            if not isinstance(message, (SystemMessage, HumanMessage))
+            if not isinstance(message, SystemMessage)
+            and not (
+                isinstance(message, HumanMessage)
+                and message.content == "Preserve this original question exactly."
+            )
         )
         assert variable_chars <= budget
-        compact_tool_messages = [m for m in final_prompt if isinstance(m, ToolMessage)]
+        # The final answer gets the independent ledger summary; the preceding
+        # research call still exercises M13 exchange compaction and pairing.
+        research_messages = manager.calls[-1]
+        compact_tool_messages = [m for m in research_messages if isinstance(m, ToolMessage)]
         assert compact_tool_messages
         retained_result_ids = {message.tool_call_id for message in compact_tool_messages}
         retained_call_ids = {
             call["id"]
-            for message in final_prompt
+            for message in research_messages
             if isinstance(message, AIMessage)
             for call in message.tool_calls
         }
@@ -264,6 +399,9 @@ class TestHappyPath:
         assert len(retained_result_ids) < 3  # old complete exchanges were compacted away
         assert any(FILING_EVIDENCE_ID in message.content for message in compact_tool_messages)
         assert any('"preview_truncated":true' in message.content for message in compact_tool_messages)
+        summary_text, summary = answer_evidence_summary(final_prompt)
+        assert FILING_EVIDENCE_ID in summary_text
+        assert summary["records"][0]["evidence_id"] == FILING_EVIDENCE_ID
         # Prompt compaction only changes model messages; validation still sees
         # the complete ledger and accepts the linked quote.
         assert result.citations == [ACCESSION]
@@ -326,6 +464,35 @@ class TestIterationCap:
 
 
 class TestToolFreeRevision:
+    def test_revision_receives_the_same_bounded_evidence_summary(self, session_factory):
+        question = "What was NVDA revenue?"
+        malformed = "This is not the AnswerClaim JSON envelope."
+        agent, manager = make_agent(
+            [tool_call()],
+            session_factory,
+            answer_script=[malformed, GOOD_CLAIM_JSON],
+        )
+
+        result = agent.run(question, "NVDA")
+
+        assert result.revises == 1
+        first_text, first_summary = answer_evidence_summary(manager.answer_calls[0])
+        revision_text, revision_summary = answer_evidence_summary(manager.answer_calls[1])
+        assert first_text == revision_text
+        assert first_summary == revision_summary
+        assert len(first_text) <= FINAL_EVIDENCE_SUMMARY_MAX_CHARS
+        assert any(
+            isinstance(message, HumanMessage) and message.content == question
+            for message in manager.answer_calls[0]
+        )
+        assert any(
+            isinstance(message, HumanMessage) and message.content == question
+            for message in manager.answer_calls[1]
+        )
+        assert malformed in "\n".join(str(message.content) for message in manager.answer_calls[1])
+        assert result.final_answer == GOOD_ANSWER
+        assert result.validation["ok"] is True
+
     def test_revision_attempted_tool_request_is_not_executed(self, session_factory):
         malformed = "This is not the AnswerClaim JSON envelope."
         attempted_tool_request = (
@@ -351,7 +518,7 @@ class TestToolFreeRevision:
         assert "insufficient to answer" in result.final_answer.lower()
 
     def test_empty_claims_keep_safe_insufficient_evidence_behavior(self, session_factory):
-        agent, _ = make_agent(
+        agent, manager = make_agent(
             [],
             session_factory,
             answer_script=['{"claims":[]}', '{"claims":[]}'],
@@ -361,6 +528,9 @@ class TestToolFreeRevision:
         assert result.revises == 1
         assert result.validation["ok"] is False
         assert "insufficient to answer" in result.final_answer.lower()
+        for prompt in manager.answer_calls:
+            _summary_text, summary = answer_evidence_summary(prompt)
+            assert summary["records"] == []
 
     def test_malformed_json_still_fails_closed(self, session_factory):
         agent, _ = make_agent(
@@ -450,7 +620,7 @@ class TestValidationGating:
             "quote": None,
         }
         draft = json.dumps({"claims": [GOOD_CLAIM, unsupported_claim]})
-        agent, _ = make_agent(
+        agent, manager = make_agent(
             [tool_call(), AIMessage(content=draft), AIMessage(content=draft)],
             session_factory,
         )
@@ -467,6 +637,9 @@ class TestValidationGating:
 
         assert GOOD_QUOTE in result.final_answer
         assert "999,000,000,000" not in result.final_answer
+        for prompt in manager.answer_calls:
+            summary_text, _summary = answer_evidence_summary(prompt)
+            assert FILING_EVIDENCE_ID in summary_text
         relevant_fields = (
             "ok",
             "citations",
