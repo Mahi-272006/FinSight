@@ -10,12 +10,14 @@ Why a factory function instead of a module-level ``app = FastAPI()``?
 Startup / shutdown ordering (lifespan):
     1. Ensure data & log directories exist.
     2. Configure logging (idempotent -- safe to call from CLI too).
-    3. Log that the app is ready.
-    Shutdown: currently a no-op; Stage 2 will close DB connections here.
+    3. Build research services for the production module-level app.
+    4. Log that the app is ready.
+    Shutdown closes provider clients and disposes the database pool created for
+    the production research services.
 
-Heavy services (ChromaDB, sentence-transformers, LLM providers) are NOT
-initialised here.  That keeps ``import app.main`` fast, test startup cheap,
-and CI green without credentials.
+Heavy services (ChromaDB, sentence-transformers, LLM providers) are not
+initialised at import time. The documented module-level Uvicorn app builds
+them in its lifespan; test-created apps remain dependency-injected by default.
 """
 
 import time
@@ -36,26 +38,141 @@ from app.api.research import router as research_router
 from app.api.reports import router as reports_router
 from app.api.watchlist import router as watchlist_router
 from app.config import APP_VERSION, get_settings
-from app.services.llm_providers import LLMAllProvidersFailed, LLMConfigurationError
+from app.services.llm_providers import (
+    LLMAllProvidersFailed,
+    LLMConfigurationError,
+)
 from app.services.thesis_service import ThesisInputError, ThesisNotFoundError
 from app.services.report_service import ReportPersistenceError
 from app.utils.logging import configure_logging, get_logger
 
 logger = get_logger(__name__)
 
+_STARTUP_DIAGNOSTICS = {
+    "LLM provider manager": (
+        "Check LLM_PROVIDER_CHAIN and configure credentials for a listed provider."
+    ),
+    "ChromaDB vector store": (
+        "Check the ChromaDB installation and CHROMA_PERSIST_DIRECTORY access."
+    ),
+    "sentence-transformer embedder": (
+        "Check sentence-transformers installation and local model availability."
+    ),
+    "database session factory": "Check DATABASE_URL configuration.",
+    "research agent graph": (
+        "Check research tool configuration and tool-calling provider support."
+    ),
+}
+
 # ---------------------------------------------------------------------------
 # Application factory
 # ---------------------------------------------------------------------------
 
-def create_app(components: dict[str, Any] | None = None) -> FastAPI:
+def _build_production_research_components(settings) -> dict[str, Any]:
+    """Construct production research services without publishing partial state."""
+    from app.services.embeddings import SentenceTransformerEmbedder
+    from app.services.llm_manager import build_manager
+    from app.services.vector_store import VectorStore
+    from app.database.postgres import get_session_factory
+    from app.graph.agent import ResearchAgent
+
+    manager = None
+    database_initialized = False
+    initializing = "LLM provider manager"
+    try:
+        # Validate provider configuration before loading local models or opening
+        # persistent stores; this avoids expensive partial startup on bad config.
+        manager = build_manager(settings)
+        initializing = "ChromaDB vector store"
+        store = VectorStore(persist_dir=settings.chroma_persist_directory)
+        initializing = "sentence-transformer embedder"
+        embedder = SentenceTransformerEmbedder()
+        initializing = "database session factory"
+        session_factory = get_session_factory()
+        database_initialized = True
+        initializing = "research agent graph"
+        agent = ResearchAgent(
+            session_factory=session_factory,
+            store=store,
+            embedder=embedder,
+            manager=manager,
+            settings=settings,
+        )
+    except Exception as exc:  # noqa: BLE001 -- startup errors must not leak secrets
+        if manager is not None:
+            _close_manager(manager)
+        if database_initialized:
+            _reset_database_engine()
+        diagnostic = _STARTUP_DIAGNOSTICS.get(
+            initializing, "Check backend startup configuration."
+        )
+        if isinstance(exc, LLMConfigurationError):
+            logger.error(
+                "Research startup configuration failed at stage '%s' (%s). %s "
+                "Configuration values are omitted.",
+                initializing,
+                type(exc).__name__,
+                diagnostic,
+            )
+            raise RuntimeError(
+                "Research services could not start: LLM or tool-calling provider "
+                "configuration is missing or invalid. Check backend configuration "
+                "and startup logs."
+            ) from None
+        logger.error(
+            "Research startup failed at stage '%s' (%s). %s",
+            initializing,
+            type(exc).__name__,
+            diagnostic,
+        )
+        raise RuntimeError(
+            f"Research services could not start while initializing {initializing}. "
+            "Check backend configuration and startup logs."
+        ) from None
+
+    return {
+        "store": store,
+        "embedder": embedder,
+        "manager": manager,
+        "session_factory": session_factory,
+        "research_agent": agent,
+    }
+
+
+def _close_manager(manager: Any) -> None:
+    """Close provider clients without allowing teardown errors to mask startup."""
+    try:
+        manager.close()
+    except Exception as exc:  # noqa: BLE001 -- do not log provider details
+        logger.error("LLM manager cleanup failed (%s).", type(exc).__name__)
+
+
+def _reset_database_engine() -> None:
+    """Dispose the lazily created database pool without masking startup errors."""
+    try:
+        from app.database.postgres import reset_engine
+
+        reset_engine()
+    except Exception as exc:  # noqa: BLE001 -- never mask the original failure
+        logger.error("Database engine cleanup failed (%s).", type(exc).__name__)
+
+
+def create_app(
+    components: dict[str, Any] | None = None,
+    *,
+    initialize_production_research: bool = False,
+) -> FastAPI:
     """Build and return a configured FastAPI instance.
 
     Args:
         components: Optional mapping of pre-built service objects (DB session
             factory, LLM manager, …).  Stored on ``app.state.components`` so
             route handlers can retrieve them via ``request.app.state.components``
-            without importing module-level globals.  Pass ``None`` (the default)
-            during Stage 1 -- the seam exists but nothing breaks.
+            without importing module-level globals. Pass ``None`` to start with
+            an empty component mapping.
+        initialize_production_research: Build the configured vector store,
+            embedder, and LLM manager during lifespan startup. This is enabled
+            for the module-level Uvicorn app and left off for injected test apps.
 
     Returns:
         A fully configured ``FastAPI`` instance ready to be served by Uvicorn.
@@ -79,11 +196,28 @@ def create_app(components: dict[str, Any] | None = None) -> FastAPI:
             APP_VERSION, settings.app_env, settings.log_level,
         )
 
-        yield  # <-- app is now serving requests
+        owned_components: dict[str, Any] = {}
+        try:
+            if initialize_production_research:
+                owned_components = _build_production_research_components(settings)
+                app.state.components.update(owned_components)
 
-        # Shutdown -------------------------------------------------------
-        # Stage 2: close DB connection pool, flush async queues, etc.
-        logger.info("FinSight API shutting down.")
+            yield  # <-- app is now serving requests
+        finally:
+            # Shutdown ---------------------------------------------------
+            if owned_components:
+                manager = owned_components.get("manager")
+                if manager is not None:
+                    _close_manager(manager)
+                for name, component in owned_components.items():
+                    if app.state.components.get(name) is component:
+                        app.state.components.pop(name, None)
+                # Drop the agent (and its model/store references) before
+                # disposing the process-wide SQLAlchemy pool, if it was used.
+                if hasattr(app.state, "research_agent"):
+                    del app.state.research_agent
+                _reset_database_engine()
+            logger.info("FinSight API shutting down.")
 
     # ------------------------------------------------------------------
     # 2. FastAPI instance
@@ -106,7 +240,7 @@ def create_app(components: dict[str, Any] | None = None) -> FastAPI:
     # Store components immediately at construction time (not just in lifespan)
     # so the seam is available even before the first request.  The lifespan
     # below references this same dict -- it doesn't overwrite it.
-    app.state.components = components or {}
+    app.state.components = components if components is not None else {}
 
     # ------------------------------------------------------------------
     # 3. CORS middleware
@@ -334,4 +468,4 @@ def create_app(components: dict[str, Any] | None = None) -> FastAPI:
 # We create ONE instance here so ``uvicorn backend.app.main:app`` and
 # ``uvicorn app.main:app`` both work out of the box.  Tests call
 # ``create_app()`` directly so they always get a fresh, isolated instance.
-app = create_app()
+app = create_app(initialize_production_research=True)
