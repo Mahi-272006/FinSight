@@ -14,6 +14,7 @@ from app.services.llm_providers import (
     LLMConfigurationError,
     LLMError,
     LLMProviderError,
+    LLMRequestTooLargeError,
     LLMRateLimitError,
     LLMAuthError,
     LLMResponse,
@@ -33,6 +34,10 @@ def _ok(provider_name="fake"):
 
 class RateLimitError(Exception):
     """Raw provider-shaped 429: class name must trip _classify's heuristics."""
+
+
+class OversizedRequestError(Exception):
+    status_code = 413
 
 
 def _ai(text="ok"):
@@ -225,6 +230,29 @@ class FakeToolProvider:
 
 
 class TestBindToolsRateLimitRetry:
+    def test_oversized_groq_request_fails_over_without_rate_limit_wait(self):
+        waits = []
+        first = FakeToolProvider("groq", [
+            OversizedRequestError("TPM limit 8000, requested 8738 tokens"),
+        ])
+        second = FakeToolProvider("gemini", [_ai("from gemini")])
+        chain = LLMManager([first, second], sleep=waits.append).bind_tools([])
+        assert chain.invoke(QUESTION).content == "from gemini"
+        assert first._runnable.calls == 1
+        assert second._runnable.calls == 1
+        assert waits == []
+
+    def test_oversized_error_is_classified_when_all_tool_providers_fail(self):
+        first = FakeToolProvider("groq", [
+            OversizedRequestError("TPM limit 8000, requested 8738 tokens"),
+        ])
+        second = FakeToolProvider("gemini", [
+            LLMProviderError("unavailable", provider="gemini"),
+        ])
+        chain = LLMManager([first, second], sleep=lambda _seconds: None).bind_tools([])
+        with pytest.raises(LLMRequestTooLargeError):
+            chain.invoke(QUESTION)
+
     def test_wait_honors_hint_then_succeeds(self):
         waits = []
         provider = FakeToolProvider("groq", [

@@ -151,11 +151,23 @@ class TestSearchFilingSections:
         assert store.calls[0]["where"] == {"ticker": "NVDA", "section": "risk_factors"}
         assert store.calls[0]["k"] == 3
 
-    def test_k_clamped_to_eight(self):
-        store = FakeStore([])
+    def test_k_clamped_and_truncation_is_explicit(self):
+        store = FakeStore([_hit(f"excerpt {i}") for i in range(5)])
         tool = make_search_filing_sections(store, FakeEmbedder())
-        tool.invoke({"ticker": "NVDA", "query": "q", "k": 500})
-        assert store.calls[0]["k"] == 8
+        execution = tool.execute({"ticker": "NVDA", "query": "q", "k": 500})
+        assert store.calls[0]["k"] == 3
+        assert len(execution.evidence_records) == 3
+        assert "TRUNCATION:" in execution.content
+
+    def test_filing_excerpt_is_bounded_but_ledger_keeps_original(self):
+        long_text = "A" * 2_000
+        execution = make_search_filing_sections(
+            FakeStore([_hit(long_text)]), FakeEmbedder()
+        ).execute({"ticker": "NVDA", "query": "q"})
+        assert len(execution.evidence_records[0]["text"]) == 2_000
+        assert len(execution.content) < 1_700
+        assert "excerpt truncated" in execution.content
+        assert "TRUNCATION:" in execution.content
 
     def test_no_results_message(self):
         tool = make_search_filing_sections(FakeStore([]), FakeEmbedder())
@@ -187,17 +199,7 @@ class TestSearchFilingSections:
                         "id": "injection-1",
                         "type": "tool_call",
                     }]),
-                    AIMessage(content=json.dumps({"claims": [{
-                        "text": "Export controls constrain sales.",
-                        "claim_type": "filing_quote",
-                        "supporting_evidence_ids": [
-                            evidence.build_filing_chunk_evidence_id(
-                                1045810, ACCESSION, f"{ACCESSION}:0"
-                            )
-                        ],
-                        "accession": ACCESSION,
-                        "quote": "Export controls constrain sales.",
-                    }]})),
+                    AIMessage(content="research complete"),
                 ]
                 self.calls = []
 
@@ -211,6 +213,25 @@ class TestSearchFilingSections:
 
             def bind_tools(self, tools):
                 return self.runnable
+
+            def generate(self, messages):
+                from app.services.llm_providers import LLMResponse
+
+                return LLMResponse(
+                    text=json.dumps({"claims": [{
+                        "text": "Export controls constrain sales.",
+                        "claim_type": "filing_quote",
+                        "supporting_evidence_ids": [
+                            evidence.build_filing_chunk_evidence_id(
+                                1045810, ACCESSION, f"{ACCESSION}:0"
+                            )
+                        ],
+                        "accession": ACCESSION,
+                        "quote": "Export controls constrain sales.",
+                    }]}),
+                    provider="scripted", model="test-model", input_tokens=1,
+                    output_tokens=1, latency_ms=0,
+                )
 
         manager = CapturingManager()
         agent = ResearchAgent(
@@ -267,6 +288,23 @@ class TestSearchFilingSections:
 
 
 class TestGetFinancialFacts:
+    def test_fact_and_calculated_results_are_capped(self, session_factory):
+        with session_factory() as session:
+            for year in range(2020, 2025):
+                session.add(FinancialFact(
+                    cik=1045810, metric="bounded_metric", value=year,
+                    unit="USD", period_type="annual", fiscal_year=year,
+                    fiscal_period="FY", source_concept="Revenue",
+                    form="10-K", accession_number=f"0001045810-26-{year:06d}",
+                ))
+            session.commit()
+        execution = make_get_financial_facts(session_factory).execute({
+            "ticker": "NVDA", "metric": "bounded_metric", "limit": 1000,
+        })
+        assert len(execution.evidence_records) == 4
+        assert "TRUNCATION:" in execution.content
+        assert all(record["fiscal_year"] for record in execution.evidence_records)
+
     def test_verified_fact_with_provenance(self, session_factory):
         tool = make_get_financial_facts(session_factory)
         result = tool.invoke({"ticker": "NVDA", "metric": "revenue"})
@@ -325,6 +363,48 @@ class TestGetFinancialFacts:
 
 
 class TestGetInvestigationSignals:
+    def test_signal_rows_and_text_are_bounded_with_provenance(self, session_factory):
+        source_accessions = [
+            f"0001045810-26-{index:06d}" for index in range(12)
+        ]
+        with session_factory() as session:
+            for year in range(2020, 2025):
+                session.add(InvestigationSignal(
+                    cik=1045810, ticker="NVDA", signal_type=f"signal_{year}",
+                    severity="low", fiscal_year=year, fiscal_period="FY",
+                    period_type="annual", headline="H" * 400,
+                    explanation="E" * 800, evidence_json="X" * 600,
+                    source_accessions_json=json.dumps(source_accessions),
+                ))
+            session.commit()
+        execution = make_get_investigation_signals(session_factory).execute({
+            "ticker": "NVDA", "limit": 1000,
+        })
+        assert len(execution.evidence_records) == 4
+        assert "TRUNCATION:" in execution.content
+        assert "additional signals may exist" in execution.content
+        assert f"displayed source accessions were limited to 8 per signal" in execution.content
+        added_records = [
+            record for record in execution.evidence_records
+            if record["signal_type"].startswith("signal_")
+        ]
+        assert len(added_records) == 3
+        assert all(record["source_accessions"] == source_accessions for record in added_records)
+        assert source_accessions[7] in execution.content
+        assert source_accessions[8] not in execution.content
+        signal_2024 = next(record for record in added_records if record["signal_type"] == "signal_2024")
+        assert signal_2024["evidence_id"] == evidence.build_evidence_id(
+            "investigation_signal",
+            {
+                "cik": 1045810,
+                "signal_type": "signal_2024",
+                "fiscal_year": 2024,
+                "fiscal_period": "FY",
+                "source_accessions": source_accessions,
+            },
+        )
+        assert len(execution.content) < 6_000
+
     def test_disclaimer_first_then_signal(self, session_factory):
         tool = make_get_investigation_signals(session_factory)
         result = tool.invoke({"ticker": "NVDA"})

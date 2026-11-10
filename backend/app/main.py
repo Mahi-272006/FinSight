@@ -41,6 +41,8 @@ from app.config import APP_VERSION, get_settings
 from app.services.llm_providers import (
     LLMAllProvidersFailed,
     LLMConfigurationError,
+    LLMProviderError,
+    LLMRequestTooLargeError,
 )
 from app.services.thesis_service import ThesisInputError, ThesisNotFoundError
 from app.services.report_service import ReportPersistenceError
@@ -387,6 +389,37 @@ def create_app(
         logger.error(
             "[%s] LLMAllProvidersFailed on %s %s",
             getattr(request.state, "request_id", "-"),
+            request.method,
+            request.url.path,
+        )
+        return JSONResponse(
+            status_code=503,
+            content={"detail": "LLM service is temporarily unavailable. Try again later."},
+        )
+
+    @app.exception_handler(LLMRequestTooLargeError)
+    async def llm_request_too_large_handler(
+        request: Request, exc: LLMRequestTooLargeError
+    ) -> JSONResponse:
+        logger.warning(
+            "[%s] LLM request exceeded provider context limits on %s %s",
+            getattr(request.state, "request_id", "-"),
+            request.method,
+            request.url.path,
+        )
+        return JSONResponse(
+            status_code=413,
+            content={"detail": "Research context exceeded a provider request limit. Narrow the question and try again."},
+        )
+
+    @app.exception_handler(LLMProviderError)
+    async def llm_provider_error_handler(
+        request: Request, exc: LLMProviderError
+    ) -> JSONResponse:
+        logger.error(
+            "[%s] LLM provider request failed (%s) on %s %s",
+            getattr(request.state, "request_id", "-"),
+            type(exc).__name__,
             request.method,
             request.url.path,
         )

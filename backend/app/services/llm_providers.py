@@ -83,6 +83,10 @@ class LLMProviderError(LLMError):
         self.status_code = status_code
 
 
+class LLMRequestTooLargeError(LLMProviderError):
+    """Provider rejected a request because its input exceeded a hard limit."""
+
+
 class LLMRateLimitError(LLMProviderError):
     """429 / quota exhausted (free tier: wait or switch provider)."""
 
@@ -172,6 +176,21 @@ def _classify(exc: Exception, provider: str) -> LLMProviderError:
     name = type(exc).__name__.lower()
     text = f"{type(exc).__name__}: {exc}"
 
+    if status in (413, 400) and any(
+        marker in str(exc).lower()
+        for marker in ("too many tokens", "token limit", "request too large", "context length")
+    ):
+        return LLMRequestTooLargeError(
+            f"{provider} rejected an oversized request: {text}",
+            provider=provider,
+            status_code=status,
+        )
+    if status == 413:
+        return LLMRequestTooLargeError(
+            f"{provider} rejected an oversized request: {text}",
+            provider=provider,
+            status_code=status,
+        )
     if status == 429 or any(k in name for k in _RATE_LIMIT_NAMES):
         return LLMRateLimitError(f"{provider} rate limited: {text}", provider=provider, status_code=status or 429)
     if status in (401, 403) or any(k in name for k in _AUTH_NAMES):

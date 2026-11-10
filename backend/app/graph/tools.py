@@ -24,6 +24,37 @@ from app.graph.evidence import (
     validate_decimal_string,
 )
 
+MAX_FILING_EXCERPTS = 3
+MAX_FILING_EXCERPT_CHARS = 1_200
+MAX_FACT_ROWS = 4
+MAX_SIGNAL_ROWS = 4
+MAX_TOOL_QUERY_CHARS = 500
+MAX_SIGNAL_HEADLINE_CHARS = 240
+MAX_SIGNAL_EXPLANATION_CHARS = 480
+MAX_SIGNAL_EVIDENCE_CHARS = 400
+MAX_SIGNAL_SOURCE_ACCESSIONS = 8
+
+
+def _bounded_limit(value: Any, *, default: int, maximum: int) -> tuple[int, bool]:
+    """Normalize model-supplied row limits and report when they were adjusted."""
+    try:
+        if isinstance(value, bool):
+            raise ValueError("boolean is not a row limit")
+        if isinstance(value, float) and not value.is_integer():
+            raise ValueError("fractional value is not a row limit")
+        requested = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return default, True
+    bounded = max(1, min(requested, maximum))
+    return bounded, bounded != requested
+
+
+def _clip_model_text(value: Any, max_chars: int) -> tuple[str, bool]:
+    text = str(value or "")
+    if len(text) <= max_chars:
+        return text, False
+    return text[:max_chars] + " [excerpt truncated for model context]", True
+
 
 class _VectorStoreLike(Protocol):
     def search(self, query_vector: Sequence[float], k: int = 5, where: dict | None = None): ...
@@ -90,14 +121,20 @@ def make_search_filing_sections(
 ) -> ResearchTool:
     def execute(args: dict[str, Any]) -> ToolExecution:
         ticker = str(args["ticker"])
-        query = str(args["query"])
-        section = str(args.get("section", ""))
-        k = int(args.get("k", 4))
+        raw_query = str(args["query"])
+        query = raw_query[:MAX_TOOL_QUERY_CHARS]
+        query_was_clipped = len(raw_query) > len(query)
+        raw_section = str(args.get("section", ""))
+        section = raw_section[:100]
+        section_was_clipped = len(raw_section) > len(section)
+        k, limit_was_adjusted = _bounded_limit(
+            args.get("k", 4), default=4, maximum=MAX_FILING_EXCERPTS
+        )
         vector = embedder.embed([query])[0]
         where: dict = {"ticker": ticker.upper()}
         if section:
             where["section"] = section
-        hits = store.search(vector, k=max(1, min(k, 8)), where=where)
+        hits = store.search(vector, k=k, where=where)
         if not hits:
             scope = f" in section '{section}'" if section else ""
             return ToolExecution(
@@ -106,6 +143,7 @@ def make_search_filing_sections(
             )
         parts: list[str] = []
         records: list[EvidenceRecord] = []
+        excerpt_was_clipped = False
         for rank, hit in enumerate(hits, start=1):
             meta = hit.metadata
             acc = meta.get("accession")
@@ -115,9 +153,13 @@ def make_search_filing_sections(
             form = meta.get("form")
             filed_at = meta.get("filing_date")
             section_name = meta.get("section")
+            excerpt, was_clipped = _clip_model_text(
+                hit.text, MAX_FILING_EXCERPT_CHARS
+            )
+            excerpt_was_clipped = excerpt_was_clipped or was_clipped
             parts.append(
                 f"[{rank}] chunk_id: {chunk_id} | {meta.get('ticker')} {form} "
-                f"{acc} section:{section_name} filed:{filed_at}\n{hit.text}"
+                f"{acc} section:{section_name} filed:{filed_at}\n{excerpt}"
             )
             # Provenance must come from vector metadata, never from filing text.
             if not (isinstance(acc, str) and acc and isinstance(chunk_id, str)
@@ -156,6 +198,19 @@ def make_search_filing_sections(
         status: ToolOutcome = "success" if records else "no_results"
         if not records:
             parts.append("Some excerpts were returned without complete authoritative provenance; they are not citation-eligible.")
+        truncation_notes = []
+        if limit_was_adjusted or len(hits) >= k:
+            truncation_notes.append(
+                f"Showing up to {k} filing excerpts; additional matches may exist."
+            )
+        if excerpt_was_clipped:
+            truncation_notes.append(
+                "One or more excerpts were shortened; full source text remains in the evidence ledger."
+            )
+        if query_was_clipped or section_was_clipped:
+            truncation_notes.append("The search query or section filter was shortened to the supported length.")
+        if truncation_notes:
+            parts.append("TRUNCATION: " + " ".join(truncation_notes))
         return ToolExecution("\n\n".join(parts), records, status)
 
     @tool
@@ -178,7 +233,10 @@ def make_get_financial_facts(session_factory: Callable) -> ResearchTool:
         ticker = str(args["ticker"]).upper()
         metric = str(args.get("metric", ""))
         fiscal_year = int(args.get("fiscal_year", 0))
-        limit = max(1, int(args.get("limit", 10)))
+        limit, limit_was_adjusted = _bounded_limit(
+            args.get("limit", MAX_FACT_ROWS), default=MAX_FACT_ROWS,
+            maximum=MAX_FACT_ROWS,
+        )
         with session_factory() as session:
             company = (session.query(Company)
                        .filter(Company.ticker == ticker).first())
@@ -198,10 +256,14 @@ def make_get_financial_facts(session_factory: Callable) -> ResearchTool:
             facts = (facts_q.order_by(FinancialFact.fiscal_year.desc(),
                                       FinancialFact.fiscal_period, FinancialFact.metric,
                                       FinancialFact.filed_at.desc())
-                     .limit(limit).all())
+                     .limit(limit + 1).all())
             calculated = (metrics_q.order_by(FinancialMetric.fiscal_year.desc(),
                                              FinancialMetric.fiscal_period, FinancialMetric.metric)
-                          .limit(limit).all())
+                          .limit(limit + 1).all())
+            facts_truncated = len(facts) > limit
+            calculated_truncated = len(calculated) > limit
+            facts = facts[:limit]
+            calculated = calculated[:limit]
             company_name, cik = company.name, company.cik
 
         fy_note = f" FY{fiscal_year}" if fiscal_year else ""
@@ -271,11 +333,16 @@ def make_get_financial_facts(session_factory: Callable) -> ResearchTool:
             return ToolExecution(
                 lines[0] + f" no facts matched{metric_note}{fy_note}.", [], "no_results"
             )
+        if limit_was_adjusted or facts_truncated or calculated_truncated:
+            lines.append(
+                f"TRUNCATION: results are limited to at most {limit} source facts and "
+                "calculated metrics per requested filter; additional rows may exist."
+            )
         return ToolExecution("\n".join(lines), records, "success")
 
     @tool
     def get_financial_facts(ticker: str, metric: str = "", fiscal_year: int = 0,
-                            limit: int = 10) -> str:
+                            limit: int = MAX_FACT_ROWS) -> str:
         """Fetch deterministic financial facts and calculated metrics with provenance.
 
         This is the only source for numeric fact claims. Each row prints its
@@ -294,16 +361,24 @@ def make_get_financial_facts(session_factory: Callable) -> ResearchTool:
 def make_get_investigation_signals(session_factory: Callable) -> ResearchTool:
     def execute(args: dict[str, Any]) -> ToolExecution:
         ticker = str(args["ticker"]).upper()
+        limit, limit_was_adjusted = _bounded_limit(
+            args.get("limit", MAX_SIGNAL_ROWS), default=MAX_SIGNAL_ROWS,
+            maximum=MAX_SIGNAL_ROWS,
+        )
         with session_factory() as session:
             rows = (session.query(InvestigationSignal)
                     .filter(InvestigationSignal.ticker == ticker)
                     .order_by(InvestigationSignal.fiscal_year.desc(),
                               InvestigationSignal.fiscal_period)
-                    .all())
+                    .limit(limit + 1).all())
+        rows_truncated = len(rows) > limit
+        rows = rows[:limit]
         if not rows:
             return ToolExecution(f"No recorded investigation signals for {ticker}.", [], "no_results")
         lines = ["NOTE: these are investigation signals, not conclusions of misstatement or fraud."]
         records: list[EvidenceRecord] = []
+        content_was_truncated = False
+        provenance_was_truncated = False
         for row in rows:
             sources = _accessions(row.source_accessions_json)
             record_id = build_evidence_id("investigation_signal", {
@@ -327,23 +402,51 @@ def make_get_investigation_signals(session_factory: Callable) -> ResearchTool:
                 "text": text,
             }
             records.append(record)
+            headline, headline_clipped = _clip_model_text(
+                row.headline, MAX_SIGNAL_HEADLINE_CHARS
+            )
+            explanation, explanation_clipped = _clip_model_text(
+                row.explanation, MAX_SIGNAL_EXPLANATION_CHARS
+            )
+            evidence_text, evidence_clipped = _clip_model_text(
+                row.evidence_json, MAX_SIGNAL_EVIDENCE_CHARS
+            )
+            displayed_sources = sources[:MAX_SIGNAL_SOURCE_ACCESSIONS]
+            sources_clipped = len(sources) > len(displayed_sources)
+            if headline_clipped or explanation_clipped or evidence_clipped:
+                content_was_truncated = True
+            if sources_clipped:
+                provenance_was_truncated = True
             lines.append(
                 f"SIGNAL {row.signal_type} severity:{row.severity} "
-                f"FY{row.fiscal_year} {row.fiscal_period}: {row.headline}\n"
-                f"{row.explanation}\nevidence: {row.evidence_json} | accessions: "
-                f"{json.dumps(sources)} | evidence_id: {record_id}"
+                f"FY{row.fiscal_year} {row.fiscal_period}: {headline}\n"
+                f"{explanation}\nevidence: {evidence_text} | accessions: "
+                f"{json.dumps(displayed_sources)} | evidence_id: {record_id}"
             )
+        if rows_truncated or limit_was_adjusted or content_was_truncated or provenance_was_truncated:
+            notes = []
+            if rows_truncated or limit_was_adjusted:
+                notes.append(f"showing at most {limit} signals; additional signals may exist")
+            if content_was_truncated:
+                notes.append("one or more signal descriptions were shortened")
+            if provenance_was_truncated:
+                notes.append(
+                    f"displayed source accessions were limited to {MAX_SIGNAL_SOURCE_ACCESSIONS} per signal"
+                )
+            lines.append("TRUNCATION: " + "; ".join(notes) + ".")
         return ToolExecution("\n".join(lines), records, "success")
 
     @tool
-    def get_investigation_signals(ticker: str) -> str:
+    def get_investigation_signals(
+        ticker: str, limit: int = MAX_SIGNAL_ROWS
+    ) -> str:
         """Fetch recorded investigation signals for analyst review, never verdicts.
 
         Signals are prompts from deterministic or ML detection layers, not
         conclusions of misstatement or fraud. Cite the returned evidence ID
         and preserve the signal framing.
         """
-        return execute({"ticker": ticker}).content
+        return execute({"ticker": ticker, "limit": limit}).content
 
     return ResearchTool(get_investigation_signals, execute)
 

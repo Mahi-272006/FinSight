@@ -11,7 +11,12 @@ from fastapi import status
 from app.graph.agent import ResearchResult
 from app.database.models import Company
 from app.services.llm_manager import LLMManager
-from app.services.llm_providers import LLMAllProvidersFailed, LLMConfigurationError
+from app.services.llm_providers import (
+    LLMAllProvidersFailed,
+    LLMConfigurationError,
+    LLMProviderError,
+    LLMRequestTooLargeError,
+)
 
 
 class FakeStore:
@@ -249,6 +254,37 @@ def test_llm_failures_return_sanitized_503(research_client, error, leaked_text, 
     assert response.status_code == status.HTTP_503_SERVICE_UNAVAILABLE
     assert leaked_text not in response.text
     assert leaked_text not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "error,expected_status,expected_detail,secret",
+    [
+        (
+            LLMRequestTooLargeError("provider said TPM limit 8000 key=secret", provider="groq", status_code=413),
+            status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            "Research context exceeded a provider request limit.",
+            "key=secret",
+        ),
+        (
+            LLMProviderError("provider body includes token=private", provider="gemini", status_code=502),
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "LLM service is temporarily unavailable.",
+            "token=private",
+        ),
+    ],
+)
+def test_provider_failures_return_sanitized_response(
+    research_client, error, expected_status, expected_detail, secret, caplog
+):
+    client, _, _, agent = research_client
+    agent.error = error
+    response = client.post(
+        "/api/v1/research", json={"ticker": "MSFT", "question": "A question"}
+    )
+    assert response.status_code == expected_status
+    assert expected_detail in response.json()["detail"]
+    assert secret not in response.text
+    assert secret not in caplog.text
 
 
 def test_unhandled_agent_failure_is_sanitized_500(research_client):

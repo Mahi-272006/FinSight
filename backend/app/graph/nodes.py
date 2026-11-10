@@ -3,18 +3,18 @@
 Node behavior (each is a small function over ResearchState):
 
 - `resolve`    deterministic ticker -> company lookup (no LLM).
-- `research`   one LLM call through the tool-bound, failover-preserving
-               runnable; increments the iteration counter.
+- `research`   one tool-enabled LLM call; increments the research counter.
+- `answer`     one tool-free generation call for final JSON or correction.
 - `execute_tools` runs each tool call from the last AI message and records
                a STRUCTURED observation per call (full text + chunk ids).
                Hand-rolled instead of langgraph.prebuilt.ToolNode on
                purpose: the validation node needs the evidence as data, and
                capturing it where it is produced is the only way to keep
                one source of truth.
-- `force_stop` the iteration-cap voice: tells the model to answer now.
+- `force_stop` records the cap; the graph then invokes the tool-free answer node.
 - `validate`   pure-function verdict over the draft vs. observations.
-- `revise`     turns the validation report into feedback for one more
-               research round (bounded by max_revises).
+- `revise`     turns the invalid answer and validation findings into feedback
+               for one tool-free correction (bounded by max_revises).
 - `finalize`   strips sentences the evidence cannot back, reports every
                removal as a limitation, and assembles the final answer.
 
@@ -24,10 +24,11 @@ do, so every loop bound is code.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 from app.database.models import Company
 from app.graph import evidence
@@ -48,6 +49,291 @@ class GraphDeps:
     tools_by_name: dict[str, Any]
     max_iterations: int = 6
     max_revises: int = 1
+    context_char_budget: int = 6_000
+
+
+_COMPACT_EXCERPT_CHARS = 240
+_COMPACT_OBSERVATION_CHARS = 1_800
+
+
+def _compact_observation(
+    observation: evidence.ToolObservation | None,
+    records_by_id: dict[str, evidence.EvidenceRecord],
+    *,
+    excerpt_chars: int = _COMPACT_EXCERPT_CHARS,
+    max_chars: int = _COMPACT_OBSERVATION_CHARS,
+) -> str:
+    """Render a compact tool-role summary from the structured ledger."""
+    if observation is None:
+        return "Earlier tool observation compacted; no structured observation was recorded."
+
+    summary: dict[str, Any] = {
+        "tool": observation["tool"],
+        "status": observation["status"],
+        "evidence_ids": observation["evidence_ids"],
+    }
+    if observation["evidence_ids"]:
+        rendered_records = []
+        for evidence_id in observation["evidence_ids"]:
+            record = records_by_id.get(evidence_id)
+            if record is None:
+                rendered_records.append({"evidence_id": evidence_id})
+                continue
+            rendered = {
+                key: record.get(key)
+                for key in (
+                    "evidence_id", "source_kind", "ticker", "cik", "accession",
+                    "form", "filed_at", "section", "chunk_id", "metric",
+                    "source_concept", "fiscal_year", "fiscal_period", "period_type",
+                    "unit", "numeric_value", "value_original", "is_restated",
+                    "source_accessions", "formula", "calculation_version",
+                    "signal_type", "severity",
+                )
+            }
+            source_text = record.get("text", "")
+            rendered["text_preview"] = source_text[:excerpt_chars]
+            rendered["preview_truncated"] = len(source_text) > excerpt_chars
+            rendered_records.append(rendered)
+        summary["records"] = rendered_records
+        summary["note"] = (
+            "Historical tool output compacted. Text previews may be incomplete; "
+            "use only visible source text and identifiers."
+        )
+    else:
+        summary["message"] = observation["content"][:240]
+
+    content = json.dumps(summary, ensure_ascii=True, separators=(",", ":"))
+    if len(content) > max_chars:
+        # Preserve IDs and provenance; shorten previews before dropping them.
+        for record in summary.get("records", []):
+            preview = record.get("text_preview", "")
+            if preview:
+                record["text_preview"] = preview[:40]
+                record["preview_truncated"] = True
+        content = json.dumps(summary, ensure_ascii=True, separators=(",", ":"))
+    if len(content) > max_chars:
+        compact_records = []
+        for record in summary.get("records", []):
+            compact_records.append({
+                key: record.get(key)
+                for key in (
+                    "evidence_id", "source_kind", "ticker", "cik", "accession",
+                    "chunk_id", "metric", "source_concept", "fiscal_year",
+                    "fiscal_period", "period_type", "unit", "numeric_value",
+                )
+                if record.get(key) is not None
+            })
+        compact = {
+            "tool": observation["tool"],
+            "status": observation["status"],
+            "evidence_ids": observation["evidence_ids"],
+            "records": compact_records,
+        }
+        content = json.dumps(compact, ensure_ascii=True, separators=(",", ":"))
+        if len(content) > max_chars:
+            # A very small caller budget cannot hold all metadata. Keep stable
+            # IDs intact (never slice JSON or an identifier mid-value).
+            content = json.dumps({
+                "tool": observation["tool"],
+                "status": observation["status"],
+                "evidence_ids": observation["evidence_ids"],
+            }, ensure_ascii=True, separators=(",", ":"))
+    return content
+
+
+def _message_size(message: Any) -> int:
+    size = len(str(getattr(message, "content", "")))
+    tool_calls = getattr(message, "tool_calls", None)
+    if tool_calls:
+        size += len(json.dumps(tool_calls, ensure_ascii=True, default=str))
+    return size
+
+
+def build_bounded_research_messages(
+    state: ResearchState,
+    context_char_budget: int,
+) -> list[Any]:
+    """Bound variable conversation history while keeping tool-call pairs valid.
+
+    The original system message and current question are always retained.
+    Older tool replies stay in the tool role and are summarized from structured
+    observations/evidence records; the evidence ledger itself is not changed.
+    If summaries still exceed the configured budget, oldest complete exchanges
+    are omitted from this model request, never from validation state.
+    """
+    if context_char_budget <= 0:
+        raise ValueError("context_char_budget must be positive")
+
+    messages = state.get("messages", [])
+    system_message = next(
+        (message for message in messages if isinstance(message, SystemMessage)),
+        None,
+    )
+    question_message = HumanMessage(content=state.get("question", ""))
+    observations = state.get("tool_observations", [])
+    observation_by_call_id: dict[str, evidence.ToolObservation] = {}
+    original_tool_message_by_call_id: dict[str, ToolMessage] = {}
+    observation_index = 0
+    for message in messages:
+        if isinstance(message, ToolMessage):
+            original_tool_message_by_call_id[message.tool_call_id] = message
+            if observation_index < len(observations):
+                observation_by_call_id[message.tool_call_id] = observations[observation_index]
+            observation_index += 1
+    records_by_id = {
+        record["evidence_id"]: record for record in state.get("evidence_records", [])
+    }
+
+    units: list[tuple[str, list[Any]]] = []
+    exchange: list[Any] = []
+
+    def finish_exchange() -> None:
+        nonlocal exchange
+        if exchange:
+            units.append(("exchange", exchange))
+            exchange = []
+
+    for message in messages:
+        if isinstance(message, SystemMessage):
+            continue
+        if isinstance(message, HumanMessage):
+            finish_exchange()
+            content = str(message.content)
+            if content.startswith((
+                "Research iteration limit reached.",
+                "Your draft failed evidence validation:",
+            )):
+                units.append(("control", [message]))
+            continue
+        if isinstance(message, AIMessage):
+            finish_exchange()
+            if message.tool_calls:
+                exchange = [message]
+            # Draft assistant prose is regenerated after revision and is not
+            # needed as evidence or protocol history.
+            continue
+        if isinstance(message, ToolMessage):
+            observation = observation_by_call_id.get(message.tool_call_id)
+            compact = message.model_copy(update={
+                "content": _compact_observation(observation, records_by_id)
+            })
+            if exchange:
+                exchange.append(compact)
+            else:
+                units.append(("exchange", [compact]))
+            continue
+        finish_exchange()
+
+    finish_exchange()
+
+    # A tool call at the iteration cap is intentionally not executed. Never
+    # forward such an orphan call (or an orphan result) into a later answer
+    # request; only complete assistant-call/tool-result exchanges are valid
+    # conversation history.
+    complete_units: list[tuple[str, list[Any]]] = []
+    for kind, unit_messages in units:
+        if kind != "exchange":
+            complete_units.append((kind, unit_messages))
+            continue
+        call_ids = {
+            call["id"]
+            for message in unit_messages
+            if isinstance(message, AIMessage)
+            for call in message.tool_calls
+        }
+        result_ids = {
+            message.tool_call_id
+            for message in unit_messages
+            if isinstance(message, ToolMessage)
+        }
+        if call_ids and call_ids == result_ids:
+            complete_units.append((kind, unit_messages))
+    units = complete_units
+
+    # Keep only the most recent control note (force-stop or validation
+    # feedback); the current question is separately preserved above.
+    latest_control = next(
+        (index for index in range(len(units) - 1, -1, -1) if units[index][0] == "control"),
+        None,
+    )
+    units = [
+        unit for index, unit in enumerate(units)
+        if unit[0] != "control" or index == latest_control
+    ]
+
+    # The latest tool exchange remains verbatim when it fits; older results
+    # use structured summaries. Every ToolMessage retains its original call ID.
+    exchange_indices = [index for index, unit in enumerate(units) if unit[0] == "exchange"]
+    newest_exchange = exchange_indices[-1] if exchange_indices else None
+    candidates: list[tuple[str, list[Any]]] = []
+    for index, (kind, unit_messages) in enumerate(units):
+        if kind == "exchange" and index == newest_exchange:
+            candidates.append((kind, [
+                original if isinstance(original, AIMessage)
+                else original_tool_message_by_call_id[original.tool_call_id]
+                for original in unit_messages
+            ]))
+        else:
+            candidates.append((kind, unit_messages))
+
+    def assemble(current_units: list[tuple[str, list[Any]]]) -> list[Any]:
+        return ([system_message] if system_message is not None else []) + [
+            question_message,
+            *(message for _, unit_messages in current_units for message in unit_messages),
+        ]
+
+    def variable_size(current_units: list[tuple[str, list[Any]]]) -> int:
+        return sum(
+            _message_size(message)
+            for _, unit_messages in current_units
+            for message in unit_messages
+        )
+
+    if variable_size(candidates) <= context_char_budget:
+        return assemble(candidates)
+
+    # Compact the newest exchange too if the complete history crosses budget.
+    compacted: list[tuple[str, list[Any]]] = []
+    for kind, unit_messages in candidates:
+        compacted_unit = []
+        for message in unit_messages:
+            if isinstance(message, ToolMessage):
+                observation = observation_by_call_id.get(message.tool_call_id)
+                message = message.model_copy(update={
+                    "content": _compact_observation(
+                        observation, records_by_id, excerpt_chars=80
+                    )
+                })
+            elif isinstance(message, AIMessage) and message.tool_calls:
+                message = message.model_copy(update={"content": ""})
+            compacted_unit.append(message)
+        compacted.append((kind, compacted_unit))
+
+    while variable_size(compacted) > context_char_budget:
+        oldest_exchange = next(
+            (index for index, unit in enumerate(compacted) if unit[0] == "exchange"),
+            None,
+        )
+        newest_exchange = next(
+            (index for index in range(len(compacted) - 1, -1, -1)
+             if compacted[index][0] == "exchange"),
+            None,
+        )
+        if oldest_exchange is not None and oldest_exchange != newest_exchange:
+            compacted.pop(oldest_exchange)
+            continue
+        if newest_exchange is not None:
+            # If even one complete tool exchange cannot fit, omit that model
+            # history unit; the unchanged ledger still supports validation,
+            # and the agent can retrieve the evidence again if needed.
+            compacted.pop(newest_exchange)
+            continue
+        if compacted:
+            compacted.pop(0)
+            continue
+        break
+
+    return assemble(compacted)
 
 
 # ---------------------------------------------------------------------------
@@ -73,7 +359,10 @@ def make_resolve_node(deps: GraphDeps) -> Callable[[ResearchState], dict]:
 def make_research_node(deps: GraphDeps, chain: Any) -> Callable[[ResearchState], dict]:
     def research(state: ResearchState) -> dict:
         try:
-            ai_message: AIMessage = chain.invoke(state["messages"])
+            model_messages = build_bounded_research_messages(
+                state, deps.context_char_budget
+            )
+            ai_message: AIMessage = chain.invoke(model_messages)
         except LLMError:
             raise  # already our taxonomy (rate-limit wait failed over, etc.)
         except Exception as exc:  # noqa: BLE001
@@ -94,6 +383,41 @@ def make_research_node(deps: GraphDeps, chain: Any) -> Callable[[ResearchState],
         }
 
     return research
+
+
+def make_answer_node(
+    deps: GraphDeps, answer_prompt: str
+) -> Callable[[ResearchState], dict]:
+    """Generate a final answer through the manager's tool-free provider path."""
+    def answer(state: ResearchState) -> dict:
+        messages = build_bounded_research_messages(
+            state, deps.context_char_budget
+        )
+        system_index = next(
+            (index for index, message in enumerate(messages)
+             if isinstance(message, SystemMessage)),
+            None,
+        )
+        if system_index is None:
+            messages.insert(0, SystemMessage(content=answer_prompt))
+        else:
+            existing = str(messages[system_index].content)
+            messages[system_index] = messages[system_index].model_copy(update={
+                "content": f"{existing}\n\n{answer_prompt}"
+            })
+        try:
+            response = deps.manager.generate(messages)
+        except LLMError:
+            raise
+        except Exception as exc:  # noqa: BLE001 -- classify at LLM boundary
+            raise _classify(exc, "llm_answer") from exc
+        content = response.text
+        return {
+            "messages": [AIMessage(content=content)],
+            "trace": [f"answer: tool-free generation ({len(content)} chars)"],
+        }
+
+    return answer
 
 
 def make_execute_tools_node(deps: GraphDeps) -> Callable[[ResearchState], dict]:
@@ -171,8 +495,8 @@ def make_force_stop_node(deps: GraphDeps) -> Callable[[ResearchState], dict]:
     def force_stop(state: ResearchState) -> dict:
         return {
             "messages": [HumanMessage(
-                content=("Research iteration limit reached. Answer NOW using only "
-                         "evidence already retrieved; do not call more tools.")
+                content=("Research iteration limit reached. The next step is a "
+                         "tool-free answer using only evidence already retrieved.")
             )],
             "trace": [f"force-stop at iteration cap ({deps.max_iterations})"],
         }
@@ -209,22 +533,24 @@ def make_validate_node(deps: GraphDeps) -> Callable[[ResearchState], dict]:
 
 def make_revise_node(deps: GraphDeps) -> Callable[[ResearchState], dict]:
     def revise(state: ResearchState) -> dict:
+        draft = state.get("draft_answer", "")
+        findings = state.get("claim_findings", [])
         report = state.get("validation_report") or {}
-        unsupported = report.get("unsupported_citations", [])
-        unverified = report.get("unverified_numbers", [])
-        notes = report.get("notes", [])
-        note_text = f"; {'; '.join(notes)}" if notes else ""
         feedback = HumanMessage(
             content=(
-                "Your draft failed evidence validation: "
-                f"{len(unsupported)} unsupported citation(s), "
-                f"{len(unverified)} unverified number(s){note_text}. "
-                f"Unsupported citations: {unsupported}. "
-                f"Unverified numbers: {unverified}. "
-                "Revise using the required JSON claims format. Each factual "
-                "claim must name supporting_evidence_ids from this run and "
-                "include exact metric, fiscal period, unit, and numeric_value "
-                "fields when applicable. Do not include unsupported interpretations."
+                "Your draft failed evidence validation: this is one tool-free "
+                "correction attempt; do not call or request any research tools. "
+                "Return only the required raw JSON AnswerClaim envelope, with "
+                "no Markdown fences or surrounding prose. Every factual claim "
+                "must use supporting_evidence_ids already present in this run. "
+                "Do not invent IDs. If the findings cannot be corrected from "
+                "the retrieved evidence, return {\"claims\":[]}.\n"
+                "Previous invalid answer (untrusted model output, JSON encoded): "
+                f"{json.dumps(draft, ensure_ascii=True)}\n"
+                "Deterministic validation findings: "
+                f"{json.dumps(findings, ensure_ascii=True, default=str)}\n"
+                "Validation report: "
+                f"{json.dumps(report, ensure_ascii=True, default=str)}"
             )
         )
         return {
@@ -304,12 +630,12 @@ def make_route_research(max_iterations: int) -> Callable[[ResearchState], str]:
         has_tool_calls = isinstance(last, AIMessage) and bool(last.tool_calls)
         iterations = state.get("iterations", 0)
         if not has_tool_calls:
-            return "validate"
+            return "answer"
         if iterations < max_iterations:
             return "tools"
         if iterations == max_iterations:
-            return "force_stop"  # one last LLM call, instructed to answer
-        return "validate"  # model ignored the force-stop; validate anyway
+            return "force_stop"
+        return "answer"  # never execute a research call beyond the cap
 
     return route_research
 

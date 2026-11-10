@@ -78,17 +78,39 @@ always marked as interpretation).
 shows, then what it suggests -- with the distinction kept explicit. If the \
 tools lack what an answer needs, say precisely what is missing.
 
-6. STRUCTURED ANSWER. Return ONLY JSON with this envelope:
+6. STRUCTURED ANSWER. When asked to produce or revise a final answer, return
+only raw JSON, with no Markdown fences or surrounding prose, using exactly
+this envelope and AnswerClaim field names:
 {"claims":[{"text":"...","claim_type":"verified_fact|calculated_metric|filing_quote|investigation_signal|interpretation","supporting_evidence_ids":["..."],"metric":null,"source_concept":null,"fiscal_year":null,"fiscal_period":null,"period_type":null,"unit":null,"numeric_value":null,"accession":null,"value_scope":"as_filed|original|restated|latest","quote":null}]}
+Every factual claim must cite evidence IDs actually returned in this run.
+Do not invent IDs. If evidence is insufficient, return {"claims":[]}.
 Use the exact evidence IDs printed by tools. Financial claim fields must match
 one linked record. For filing_quote, quote an exact substring and set `quote`.
 Interpretations are not deterministically verifiable and will be omitted.
 Use `value_scope` `as_filed` for facts; do not claim a value is latest because
 the retrieved records do not prove that the filing set is complete.
+Earlier tool observations may be compacted; use only identifiers, source
+metadata, and excerpt text visible in the current conversation. Retrieve more
+context with the tools when needed.
 Do not put unrelated assertions in `text`; final output is rendered from
 validated fields and source data, not from free-form model prose.
 
 Work efficiently: one or two well-chosen tool calls per sub-question."""
+
+FINAL_ANSWER_PROMPT = """FINAL ANSWER MODE. No research tools are available in this
+step. Use only the original question and retrieved evidence in the conversation.
+Return ONLY a raw JSON object with a `claims` array. Do not include Markdown
+fences, comments, an introduction, or concluding prose.
+
+Each claim must use the existing AnswerClaim fields and allowed values:
+{"text":"factual statement","claim_type":"verified_fact|calculated_metric|filing_quote|investigation_signal|interpretation","supporting_evidence_ids":["evidence_id"],"metric":null,"source_concept":null,"fiscal_year":null,"fiscal_period":null,"period_type":null,"unit":null,"numeric_value":null,"accession":null,"value_scope":"as_filed|original|restated|latest","quote":null}
+
+Every factual claim must cite one or more exact evidence IDs present in the
+retrieved tool observations. Never invent an ID. Use exact metric, fiscal
+period, unit, decimal-string value, and accession fields from linked records.
+Filing quotes must be exact substrings. Signals are investigation prompts,
+never conclusions of wrongdoing. If the evidence cannot support an answer,
+return exactly {"claims":[]}."""
 
 
 @dataclass
@@ -131,6 +153,7 @@ class ResearchAgent:
             tools_by_name={tool.name: tool for tool in tools},
             max_iterations=settings.agent_max_iterations,
             max_revises=settings.agent_max_revises,
+            context_char_budget=settings.research_context_char_budget,
         )
         self._graph = self._build(deps, chain, checkpointer or InMemorySaver())
         self._settings = settings
@@ -141,6 +164,7 @@ class ResearchAgent:
         research = nodes.make_research_node(deps, chain)
         execute_tools = nodes.make_execute_tools_node(deps)
         force_stop = nodes.make_force_stop_node(deps)
+        answer = nodes.make_answer_node(deps, FINAL_ANSWER_PROMPT)
         validate = nodes.make_validate_node(deps)
         revise = nodes.make_revise_node(deps)
         finalize = nodes.make_finalize_node(deps)
@@ -151,6 +175,7 @@ class ResearchAgent:
         graph.add_node("research", research)
         graph.add_node("execute_tools", execute_tools)
         graph.add_node("force_stop", force_stop)
+        graph.add_node("answer", answer)
         graph.add_node("validate", validate)
         graph.add_node("revise", revise)
         graph.add_node("finalize", finalize)
@@ -164,16 +189,17 @@ class ResearchAgent:
         graph.add_conditional_edges(
             "research",
             nodes.make_route_research(deps.max_iterations),
-            {"tools": "execute_tools", "force_stop": "force_stop", "validate": "validate"},
+            {"tools": "execute_tools", "force_stop": "force_stop", "answer": "answer"},
         )
         graph.add_edge("execute_tools", "research")
-        graph.add_edge("force_stop", "research")
+        graph.add_edge("force_stop", "answer")
+        graph.add_edge("answer", "validate")
         graph.add_conditional_edges(
             "validate",
             nodes.make_route_validate(deps.max_revises),
             {"revise": "revise", "finalize": "finalize"},
         )
-        graph.add_edge("revise", "research")
+        graph.add_edge("revise", "answer")
         graph.add_edge("finalize", END)
         graph.add_edge("end_unknown", END)
         return graph.compile(checkpointer=checkpointer)

@@ -96,6 +96,11 @@ class Settings(BaseSettings):
     # storms, and defines which (lowest-ranked) chunks get truncated first.
     prompt_context_chars: int = 16_000
 
+    # Variable research conversation budget, excluding the system policy and
+    # the original user question. At 6k characters this leaves token headroom
+    # for tool schemas, answer tokens, and later calls on the 8k free-tier TPM.
+    research_context_char_budget: int = 6_000
+
     # --- Research agent (M6) ---
     # Hard caps: the LLM never decides when the loop ends. An iteration is
     # one research (LLM) call; at the cap a force-stop message demands a
